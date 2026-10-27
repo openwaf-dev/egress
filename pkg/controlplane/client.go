@@ -30,7 +30,8 @@ type Client struct {
 }
 
 // NewClient returns a Client for the control plane at baseURL (https, or http on a loopback
-// host for local testing). httpClient may be nil.
+// host for local testing). httpClient may be nil: the default never follows a redirect (a 3xx
+// is an error), so signed requests only ever reach baseURL.
 func NewClient(baseURL string, signer *Signer, httpClient *http.Client) (*Client, error) {
 	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -49,7 +50,10 @@ func NewClient(baseURL string, signer *Signer, httpClient *http.Client) (*Client
 		return nil, errors.New("a signer is required")
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{
+			Timeout:       30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
 	return &Client{base: u, signer: signer, http: httpClient}, nil
 }

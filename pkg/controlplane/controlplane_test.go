@@ -577,3 +577,29 @@ func TestWireEventAcceptedByControlPlane(t *testing.T) {
 		t.Errorf("queued %d dropped %d, want 0 and 4", sink.Queued(), sink.Dropped())
 	}
 }
+
+// A redirect from the control plane is an error, never followed with the signed request.
+func TestClientDoesNotFollowRedirects(t *testing.T) {
+	followed := false
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed = true }))
+	defer elsewhere.Close()
+	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.RequestURI(), http.StatusFound)
+	}))
+	defer cp.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s, _ := NewSigner(testNode, priv)
+	c, err := NewClient(cp.URL, s, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewResolver(c, ResolverOptions{}).Refresh(context.Background()); err == nil || followed {
+		t.Fatalf("config: err %v, redirect followed %v", err, followed)
+	}
+	sink := NewEventSink(c, EventSinkOptions{})
+	sink.Block(egress.BlockEvent{TenantID: orgA, AgentID: agentA, Target: "openrouter", Code: egress.CodeEgressBlocked, Status: 403, Method: "GET", Path: "/", IP: "203.0.113.7"})
+	if err := sink.Flush(context.Background()); err == nil || followed {
+		t.Fatalf("events: err %v, redirect followed %v", err, followed)
+	}
+}
