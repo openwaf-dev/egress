@@ -33,6 +33,27 @@ jobs:
       - run: go vet ./...
       - run: go test -race -count=1 ./...
 
+  govulncheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Go toolchain of the image
+        id: go
+        # The image builds with golang:<minor>-alpine, i.e. the latest patch release of that minor:
+        # scan with the same toolchain so standard-library findings match what ships.
+        run: |
+          v=$(sed -n 's/^FROM golang:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          check-latest: true
+      - name: govulncheck
+        env:
+          GOTOOLCHAIN: local
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
   publish:
     needs: test
     if: github.event_name == 'push'
