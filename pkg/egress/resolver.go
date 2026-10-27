@@ -59,9 +59,17 @@ type Resolver interface {
 	Resolve(ctx context.Context, req ResolveRequest) (*Resolution, error)
 }
 
-// ResolverStats is optionally implemented by a Resolver to report sizes on /health.
+// ResolverStats is optionally implemented by a Resolver to report sizes on /health (static
+// mode only).
 type ResolverStats interface {
 	Counts() (agents, targets int)
+}
+
+// ResolverReadiness is optionally implemented by a Resolver whose policies arrive at run time
+// (control-plane mode): /health answers 503 {"status":"starting"} while Ready is false and
+// reports no agent or target totals.
+type ResolverReadiness interface {
+	Ready() bool
 }
 
 // bearerToken returns the Authorization value without its "Bearer " prefix.

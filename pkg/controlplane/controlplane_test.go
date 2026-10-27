@@ -603,3 +603,29 @@ func TestClientDoesNotFollowRedirects(t *testing.T) {
 		t.Fatalf("events: err %v, redirect followed %v", err, followed)
 	}
 }
+
+// /health answers 503 starting until a document is in force, then ok without totals.
+func TestHealthInControlPlaneMode(t *testing.T) {
+	_, c := setup(t)
+	r := NewResolver(c, ResolverOptions{Interval: time.Hour})
+	gw := egress.NewServerWithResolver(r, nil)
+	health := func() (int, map[string]any) {
+		rec := httptest.NewRecorder()
+		gw.ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
+		var body map[string]any
+		json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body
+	}
+	if code, body := health(); code != http.StatusServiceUnavailable || len(body) != 1 || body["status"] != "starting" {
+		t.Fatalf("before the first document: %d %v", code, body)
+	}
+	if _, err := r.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	code, body := health()
+	_, hasAgents := body["agents"]
+	_, hasTargets := body["targets"]
+	if code != http.StatusOK || body["status"] != "ok" || body["service"] != "openwaf-egress" || body["openbao"] != false || hasAgents || hasTargets {
+		t.Fatalf("with a document: %d %v", code, body)
+	}
+}

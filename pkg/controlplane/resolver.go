@@ -93,11 +93,11 @@ type snapshot struct {
 }
 
 // Resolver resolves agents from the node configuration document it polls from the control
-// plane. It implements egress.Resolver and egress.ResolverStats. Until a first document is
-// accepted every request answers 503. Afterwards the last good document stays in force across
-// network and server errors for at most MaxStale since the control plane last confirmed it
-// (200 or 304); a 401 or 403 from the control plane (node revoked or key replaced) withdraws it
-// at once.
+// plane. It implements egress.Resolver, egress.ResolverStats and egress.ResolverReadiness.
+// Until a first document is accepted every request answers 503. Afterwards the last good
+// document stays in force across network and server errors for at most MaxStale since the
+// control plane last confirmed it (200 or 304); a 401 or 403 from the control plane (node
+// revoked or key replaced) withdraws it at once.
 type Resolver struct {
 	client   *Client
 	interval time.Duration

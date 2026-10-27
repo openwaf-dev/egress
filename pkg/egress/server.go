@@ -211,7 +211,18 @@ func (s *Server) parseProxyRoute(p string) (agentName, targetAlias, subPath stri
 	return "", "", "", false
 }
 
+// handleHealth answers /health. With a resolver that reports readiness (control-plane mode) it
+// answers 503 {"status":"starting"} while no usable configuration is in force and gives no
+// agent or target totals; otherwise (static mode) it also reports the totals.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	rd, withReadiness := s.resolver.(ResolverReadiness)
+	if withReadiness && !rd.Ready() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "starting"})
+		return
+	}
+
 	vaultOK := false
 	if s.vault != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -221,20 +232,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	agents, targets := 0, 0
-	if st, ok := s.resolver.(ResolverStats); ok {
-		agents, targets = st.Counts()
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	body := map[string]interface{}{
 		"status":  "ok",
 		"service": "openwaf-egress",
 		"version": "0.1.0",
 		"openbao": vaultOK,
-		"targets": targets,
-		"agents":  agents,
-	})
+	}
+	if st, ok := s.resolver.(ResolverStats); ok && !withReadiness {
+		body["agents"], body["targets"] = st.Counts()
+	}
+	json.NewEncoder(w).Encode(body)
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, targetAlias, subPath string) {
