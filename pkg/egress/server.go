@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -96,6 +97,7 @@ func withoutMediaData(s string) string {
 type Server struct {
 	resolver  Resolver
 	vault     SecretProvider
+	events    EventSink
 	client    *http.Client
 	logOutput io.Writer
 }
@@ -131,6 +133,7 @@ func NewServerWithResolver(resolver Resolver, vault SecretProvider, opts ...Opti
 	s := &Server{
 		resolver: resolver,
 		vault:    vault,
+		events:   LogSink{},
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   UpstreamTimeout, // whole exchange, streamed body included
@@ -256,13 +259,15 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 		}
 	}
 	if !allowed {
-		s.respondError(w, http.StatusForbidden, "egress_blocked", fmt.Sprintf("Agent %q is not permitted to access target %q", resolvedAgent, targetAlias))
+		s.emitBlock(r, res, targetAlias, subPath, http.StatusForbidden, CodeEgressBlocked, nil)
+		s.respondError(w, http.StatusForbidden, CodeEgressBlocked, fmt.Sprintf("Agent %q is not permitted to access target %q", resolvedAgent, targetAlias))
 		return
 	}
 
 	// 3. SSRF Protection: target host must not resolve to private addresses
 	if err := ValidatePublicDestination(targetCfg.Host); err != nil {
-		s.respondError(w, http.StatusForbidden, "ssrf_blocked", fmt.Sprintf("Egress to destination blocked: %v", err))
+		s.emitBlock(r, res, targetAlias, subPath, http.StatusForbidden, CodeSSRFBlocked, nil)
+		s.respondError(w, http.StatusForbidden, CodeSSRFBlocked, fmt.Sprintf("Egress to destination blocked: %v", err))
 		return
 	}
 
@@ -293,7 +298,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 		if inspect && len(bodyBytes) <= maxBodyBytes {
 			limit = aiagents.MaxInspectBytes
 		}
-		s.respondError(w, http.StatusRequestEntityTooLarge, "body_too_large",
+		s.emitBlock(r, res, targetAlias, subPath, http.StatusRequestEntityTooLarge, CodeBodyTooLarge, nil)
+		s.respondError(w, http.StatusRequestEntityTooLarge, CodeBodyTooLarge,
 			fmt.Sprintf("Request body exceeds %d bytes (text outside inline media counts against the inspection window when injection or DLP checks are on)", limit))
 		return
 	}
@@ -309,6 +315,11 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 				}
 			}
 			if len(injectionFindings) > 0 {
+				ids := make([]string, 0, len(injectionFindings))
+				for _, d := range injectionFindings {
+					ids = append(ids, d.ID)
+				}
+				s.emitBlock(r, res, targetAlias, subPath, http.StatusForbidden, CodeInjectionDetected, ids)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				json.NewEncoder(w).Encode(map[string]interface{}{
@@ -326,6 +337,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 		if policy.BlockDLP {
 			dlpMatches := ScanDLP(inspected)
 			if len(dlpMatches) > 0 {
+				var types []string
+				for _, m := range dlpMatches {
+					if !slices.Contains(types, m.Type) {
+						types = append(types, m.Type)
+					}
+				}
+				s.emitBlock(r, res, targetAlias, subPath, http.StatusForbidden, CodeDataLeakBlocked, types)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				json.NewEncoder(w).Encode(map[string]interface{}{
