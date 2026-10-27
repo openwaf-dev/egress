@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/openwaf-dev/egress/pkg/egress"
 )
@@ -26,7 +29,10 @@ const (
 	MaxDetections  = 16
 )
 
-var reDetectionID = regexp.MustCompile(`^[a-z0-9_.-]{1,64}$`)
+var (
+	reDetectionID = regexp.MustCompile(`^[a-z0-9_.-]{1,64}$`)
+	reMethod      = regexp.MustCompile(`^[A-Z]{1,16}$`)
+)
 
 // EventSinkOptions tunes an EventSink; zero values take the defaults.
 type EventSinkOptions struct {
@@ -128,10 +134,14 @@ func (s *EventSink) Queued() int {
 	return s.size
 }
 
-// Block implements egress.EventSink. Events without a tenant (static mode) are ignored.
+// Block implements egress.EventSink. Events without a tenant (static mode) are ignored; an
+// event the protocol would refuse (bad ids, target, status or IP) is dropped and counted.
 func (s *EventSink) Block(ev egress.BlockEvent) {
 	e, ok := wireEvent(ev)
 	if !ok {
+		if ev.TenantID != "" {
+			s.dropped.Add(1)
+		}
 		return
 	}
 	raw, err := json.Marshal(e)
@@ -164,23 +174,23 @@ var validCodes = []string{
 
 // wireEvent converts ev to the protocol shape, enforcing its limits.
 func wireEvent(ev egress.BlockEvent) (Event, bool) {
-	if ev.TenantID == "" || ev.AgentID == "" || !slices.Contains(validCodes, ev.Code) {
+	if !reUUID.MatchString(ev.TenantID) || !reUUID.MatchString(ev.AgentID) || !slices.Contains(validCodes, ev.Code) ||
+		!reTargetID.MatchString(ev.Target) || ev.Status < 400 || ev.Status > 599 {
+		return Event{}, false
+	}
+	ip, err := netip.ParseAddr(ev.IP)
+	if err != nil {
 		return Event{}, false
 	}
 	ts := ev.Time
 	if ts.IsZero() {
 		ts = time.Now()
 	}
-	p := ev.Path
-	if i := strings.IndexByte(p, '?'); i >= 0 {
-		p = p[:i]
+	method := strings.ToUpper(ev.Method)
+	if !reMethod.MatchString(method) {
+		method = "OTHER"
 	}
-	if len(p) > MaxPathBytes {
-		p = strings.ToValidUTF8(p[:MaxPathBytes], "")
-	}
-	if p == "" {
-		p = "/"
-	}
+	p := eventPath(ev.Path)
 	dets := []string{}
 	if ev.Code == egress.CodeInjectionDetected || ev.Code == egress.CodeDataLeakBlocked {
 		for _, d := range ev.Detections {
@@ -199,11 +209,34 @@ func wireEvent(ev egress.BlockEvent) (Event, bool) {
 		Target:     ev.Target,
 		Code:       ev.Code,
 		Status:     ev.Status,
-		Method:     ev.Method,
+		Method:     method,
 		Path:       p,
-		IP:         ev.IP,
+		IP:         ip.String(),
 		Detections: dets,
 	}, true
+}
+
+// eventPath returns p as the protocol accepts it: no query, valid UTF-8 of printable characters
+// only, a leading "/" and at most MaxPathBytes bytes.
+func eventPath(p string) string {
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		p = p[:i]
+	}
+	var b strings.Builder
+	b.Grow(min(len(p)+1, MaxPathBytes))
+	if !strings.HasPrefix(p, "/") {
+		b.WriteByte('/')
+	}
+	for _, r := range p {
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			continue
+		}
+		if b.Len()+utf8.RuneLen(r) > MaxPathBytes {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // Run delivers events until ctx is done, then makes a last attempt (5 s) to deliver what is

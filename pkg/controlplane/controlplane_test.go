@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,6 +21,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/openwaf-dev/egress/pkg/egress"
 )
@@ -490,5 +492,88 @@ func TestClientRequiresHTTPS(t *testing.T) {
 	}
 	if _, err := NewSigner("Bad_Node", priv); err == nil {
 		t.Error("invalid node id accepted")
+	}
+}
+
+// serverAccepts mirrors the control plane's event validation (egressnode v1): an event it
+// refuses makes the whole batch answer 422.
+func serverAccepts(e Event) error {
+	if _, err := time.Parse(time.RFC3339Nano, e.TS); err != nil {
+		return fmt.Errorf("ts: %v", err)
+	}
+	if !reUUID.MatchString(e.OrgID) || !reUUID.MatchString(e.AgentID) {
+		return fmt.Errorf("ids %q %q", e.OrgID, e.AgentID)
+	}
+	if !regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`).MatchString(e.Target) || e.Status < 400 || e.Status > 599 {
+		return fmt.Errorf("target %q status %d", e.Target, e.Status)
+	}
+	if !regexp.MustCompile(`^[A-Z]{1,16}$`).MatchString(e.Method) {
+		return fmt.Errorf("method %q", e.Method)
+	}
+	if e.Path == "" || len(e.Path) > 2048 || e.Path[0] != '/' || !utf8.ValidString(e.Path) {
+		return fmt.Errorf("path %q", e.Path)
+	}
+	for _, c := range e.Path {
+		if c == '?' || c < 0x20 || c == 0x7f {
+			return fmt.Errorf("path character %U", c)
+		}
+	}
+	if _, err := netip.ParseAddr(e.IP); err != nil {
+		return fmt.Errorf("ip %q", e.IP)
+	}
+	if len(e.Detections) > 16 {
+		return fmt.Errorf("%d detections", len(e.Detections))
+	}
+	for _, d := range e.Detections {
+		if !regexp.MustCompile(`^[a-z0-9_.-]{1,64}$`).MatchString(d) {
+			return fmt.Errorf("detection %q", d)
+		}
+	}
+	return nil
+}
+
+// Whatever method and path a caller sends, the event is one the control plane accepts.
+func TestWireEventAcceptedByControlPlane(t *testing.T) {
+	base := egress.BlockEvent{Time: time.Now(), TenantID: orgA, AgentID: agentA, Target: "openrouter",
+		Code: egress.CodeEgressBlocked, Status: 403, IP: "203.0.113.7"}
+	long := "/" + strings.Repeat("%FF\xff\u00e9\x7f", 1000)
+	cases := []struct{ method, path, wantMethod, wantPrefix string }{
+		{"post", "/\x01chat/completions", "POST", "/chat/completions"},
+		{"M-SEARCH", "chat", "OTHER", "/chat"},
+		{"VERYLONGMETHODNAMEX", "", "OTHER", "/"},
+		{"GET", "/a?b=\x00c", "GET", "/a"},
+		{"GET", "/\u200b\ufffd\u0085x", "GET", "/x"},
+		{"PUT", long, "PUT", "/%FFé%FFé"},
+	}
+	for _, c := range cases {
+		ev := base
+		ev.Method, ev.Path = c.method, c.path
+		e, ok := wireEvent(ev)
+		if !ok {
+			t.Fatalf("%q %q: event dropped", c.method, c.path)
+		}
+		if err := serverAccepts(e); err != nil {
+			t.Errorf("%q %q: the control plane would refuse the event: %v", c.method, c.path, err)
+		}
+		if e.Method != c.wantMethod || !strings.HasPrefix(e.Path, c.wantPrefix) {
+			t.Errorf("%q %q: got %q %q", c.method, c.path, e.Method, e.Path)
+		}
+	}
+
+	// Events the control plane would refuse are dropped and counted, never sent.
+	_, cl := setup(t)
+	sink := NewEventSink(cl, EventSinkOptions{})
+	for _, bad := range []func(*egress.BlockEvent){
+		func(e *egress.BlockEvent) { e.IP = "not-an-ip" },
+		func(e *egress.BlockEvent) { e.Target = "Bad_Target" },
+		func(e *egress.BlockEvent) { e.Status = 200 },
+		func(e *egress.BlockEvent) { e.AgentID = "support-bot" },
+	} {
+		ev := base
+		bad(&ev)
+		sink.Block(ev)
+	}
+	if sink.Queued() != 0 || sink.Dropped() != 4 {
+		t.Errorf("queued %d dropped %d, want 0 and 4", sink.Queued(), sink.Dropped())
 	}
 }
