@@ -21,6 +21,13 @@ type SecretProvider interface {
 	Health(ctx context.Context) error
 }
 
+// MountSecretProvider is a SecretProvider that can also read from an explicit KV v2 mount;
+// it is required for credential references that carry a mount (control-plane mode).
+type MountSecretProvider interface {
+	SecretProvider
+	GetSecretAt(ctx context.Context, mount, path, key string) (string, error)
+}
+
 type cachedSecret struct {
 	value     string
 	expiresAt time.Time
@@ -168,9 +175,18 @@ func (v *VaultClient) getToken(ctx context.Context) (string, error) {
 	return v.token, nil
 }
 
-// GetSecret fetches a specific key from OpenBao KV v2 (with cache).
+// GetSecret fetches a specific key from OpenBao KV v2 under the configured mount (with cache).
 func (v *VaultClient) GetSecret(ctx context.Context, path, key string) (string, error) {
-	cacheKey := path + ":" + key
+	return v.GetSecretAt(ctx, v.kvMount, path, key)
+}
+
+// GetSecretAt fetches a specific key from the KV v2 mount named by mount (with cache).
+func (v *VaultClient) GetSecretAt(ctx context.Context, mount, path, key string) (string, error) {
+	mount = strings.Trim(mount, "/")
+	if mount == "" {
+		return "", fmt.Errorf("kv mount is required")
+	}
+	cacheKey := mount + "\x00" + path + "\x00" + key
 
 	v.mu.RLock()
 	c, ok := v.cache[cacheKey]
@@ -187,7 +203,7 @@ func (v *VaultClient) GetSecret(ctx context.Context, path, key string) (string, 
 	}
 
 	cleanPath := strings.Trim(path, "/")
-	reqURL := fmt.Sprintf("%s/v1/%s/data/%s", v.addr, v.kvMount, cleanPath)
+	reqURL := fmt.Sprintf("%s/v1/%s/data/%s", v.addr, mount, cleanPath)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {

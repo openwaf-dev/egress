@@ -382,14 +382,15 @@ func TestSSRFBlocking(t *testing.T) {
 	defer upstream.Close()
 
 	// Add an internal target to config
-	srv.cfg.Targets["internal_metadata"] = TargetConfig{
+	cfg := srv.resolver.(*Config)
+	cfg.Targets["internal_metadata"] = TargetConfig{
 		BaseURL: "http://169.254.169.254",
 		Host:    "169.254.169.254",
 	}
 	// Allow it on agent
-	a := srv.cfg.Agents["support-agent"]
+	a := cfg.Agents["support-agent"]
 	a.AllowedTargets = append(a.AllowedTargets, "internal_metadata")
-	srv.cfg.Agents["support-agent"] = a
+	cfg.Agents["support-agent"] = a
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v1/proxy/internal_metadata/latest/meta-data/", nil)

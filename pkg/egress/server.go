@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -93,7 +94,7 @@ func withoutMediaData(s string) string {
 
 // Server is the OpenWAF Egress Gateway HTTP handler.
 type Server struct {
-	cfg       *Config
+	resolver  Resolver
 	vault     SecretProvider
 	client    *http.Client
 	logOutput io.Writer
@@ -107,8 +108,17 @@ const (
 	UpstreamTimeout       = 15 * time.Minute
 )
 
-// NewServer initializes a new Egress Gateway server.
-func NewServer(cfg *Config, vault SecretProvider) *Server {
+// Option configures a Server.
+type Option func(*Server)
+
+// NewServer initializes a new Egress Gateway server for a static config file.
+func NewServer(cfg *Config, vault SecretProvider, opts ...Option) *Server {
+	return NewServerWithResolver(cfg, vault, opts...)
+}
+
+// NewServerWithResolver initializes a gateway whose agent policies, targets and credential
+// references come from resolver (e.g. a control-plane document) instead of a Config.
+func NewServerWithResolver(resolver Resolver, vault SecretProvider, opts ...Option) *Server {
 	transport := &http.Transport{
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
@@ -118,9 +128,9 @@ func NewServer(cfg *Config, vault SecretProvider) *Server {
 		ResponseHeaderTimeout: upstreamHeaderTimeout,
 	}
 
-	return &Server{
-		cfg:   cfg,
-		vault: vault,
+	s := &Server{
+		resolver: resolver,
+		vault:    vault,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   UpstreamTimeout, // whole exchange, streamed body included
@@ -131,6 +141,10 @@ func NewServer(cfg *Config, vault SecretProvider) *Server {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -184,82 +198,58 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	agents, targets := 0, 0
+	if st, ok := s.resolver.(ResolverStats); ok {
+		agents, targets = st.Counts()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "ok",
 		"service": "openwaf-egress",
 		"version": "0.1.0",
 		"openbao": vaultOK,
-		"targets": len(s.cfg.Targets),
-		"agents":  len(s.cfg.Agents),
+		"targets": targets,
+		"agents":  agents,
 	})
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, targetAlias, subPath string) {
 	ctx := r.Context()
 
-	// 1. Resolve agent
-	var agentCfg *AgentConfig
-	resolvedAgent := agentName
-
+	// 1. Resolve agent, policy, target and credential reference
 	authHeader := r.Header.Get("Authorization")
-	customAgentHeader := r.Header.Get("X-OpenWAF-Agent")
-
-	if customAgentHeader != "" {
-		resolvedAgent = customAgentHeader
-	}
-
-	if resolvedAgent != "" {
-		if a, exists := s.cfg.Agents[resolvedAgent]; exists {
-			agentCfg = &a
+	res, err := s.resolver.Resolve(ctx, ResolveRequest{
+		RouteAgent:    agentName,
+		HeaderAgent:   r.Header.Get("X-OpenWAF-Agent"),
+		Authorization: authHeader,
+		Target:        targetAlias,
+	})
+	if err != nil {
+		var re *ResolveError
+		if errors.As(err, &re) {
+			log.Printf("[EGRESS %d] %s: Agent=%q Target=%q Path=%q AuthPresent=%t",
+				re.Status, re.Code, agentName, targetAlias, r.URL.Path, authHeader != "")
+			s.respondError(w, re.Status, re.Code, re.Message)
+			return
 		}
-	} else if authHeader != "" {
-		// Identify by token if agentName not in route
-		tokenVal := strings.TrimPrefix(authHeader, "Bearer ")
-		for name, a := range s.cfg.Agents {
-			if a.Token == tokenVal {
-				agentCfg = &a
-				resolvedAgent = name
-				break
-			}
-		}
-	}
-
-	if agentCfg == nil {
-		log.Printf("[EGRESS 401] Unauthorized: Agent=%q Target=%q Path=%q AuthPresent=%t",
-			resolvedAgent, targetAlias, r.URL.Path, authHeader != "")
-		s.respondError(w, http.StatusUnauthorized, "unauthorized_agent", "Agent not identified or token mismatch")
+		log.Printf("[EGRESS 503] Policy resolution failed: Agent=%q Target=%q: %v", agentName, targetAlias, err)
+		s.respondError(w, http.StatusServiceUnavailable, "policy_unavailable", "Agent policy is not available yet")
 		return
 	}
-
-	// Require the agent's placeholder token whenever one is configured, regardless of how
-	// the agent was identified (route, X-OpenWAF-Agent header, or token lookup). A caller
-	// who knows only the agent name must not be able to use the gateway: doing so would
-	// also hand them the real upstream credential injected below.
-	if agentCfg.Token != "" {
-		if authHeader == "" {
-			log.Printf("[EGRESS 401] Missing token for agent %q: Path=%q", resolvedAgent, r.URL.Path)
-			s.respondError(w, http.StatusUnauthorized, "token_required", "Agent placeholder token required: Authorization: Bearer <token>")
-			return
-		}
-		tokenVal := strings.TrimPrefix(authHeader, "Bearer ")
-		if tokenVal != agentCfg.Token {
-			log.Printf("[EGRESS 401] Token mismatch for agent %q: Path=%q", resolvedAgent, r.URL.Path)
-			s.respondError(w, http.StatusUnauthorized, "invalid_token", "Agent placeholder token did not match policy")
-			return
-		}
-	}
+	resolvedAgent := res.AgentName
+	policy := res.Policy
 
 	// 2. Validate target alias
-	targetCfg, targetExists := s.cfg.Targets[targetAlias]
-	if !targetExists {
+	if res.Target == nil {
 		s.respondError(w, http.StatusNotFound, "unknown_target", fmt.Sprintf("Target alias %q is not defined", targetAlias))
 		return
 	}
+	targetCfg := *res.Target
 
 	// Check if target is allowed for this agent
 	allowed := false
-	for _, a := range agentCfg.AllowedTargets {
+	for _, a := range policy.AllowedTargets {
 		if a == targetAlias || a == "*" {
 			allowed = true
 			break
@@ -292,7 +282,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 	// Inline images, audio and video (data:image/…;base64,…) are binary the detectors cannot
 	// read; they are left out of the inspected text, so a chat request with a photo is not
 	// refused for its size. The rest of the body must fit the inspection window.
-	inspect := agentCfg.EnforceInjection || agentCfg.BlockDLP
+	inspect := policy.EnforceInjection || policy.BlockDLP
 	bodyStr := string(bodyBytes)
 	inspected := bodyStr
 	if inspect {
@@ -310,7 +300,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 
 	if len(bodyBytes) > 0 {
 		// Prompt Injection check using OpenWAF's internal/aiagents.Detect
-		if agentCfg.EnforceInjection {
+		if policy.EnforceInjection {
 			detections := aiagents.Detect(inspected)
 			var injectionFindings []aiagents.Detection
 			for _, d := range detections {
@@ -333,7 +323,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 		}
 
 		// DLP check
-		if agentCfg.BlockDLP {
+		if policy.BlockDLP {
 			dlpMatches := ScanDLP(inspected)
 			if len(dlpMatches) > 0 {
 				w.Header().Set("Content-Type", "application/json")
@@ -352,14 +342,19 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 
 	// 5. Credential Resolution from OpenBao
 	var realCredential string
-	if credRef, hasCred := agentCfg.CredentialMapping[targetAlias]; hasCred && s.vault != nil {
+	if credRef := res.Credential; credRef != nil && s.vault != nil {
 		var err error
-		realCredential, err = s.vault.GetSecret(ctx, credRef.Path, credRef.Key)
+		realCredential, err = s.getSecret(ctx, *credRef)
 		if err != nil {
 			log.Printf("[EGRESS] Failed resolving secret %s:%s for agent %s: %v", credRef.Path, credRef.Key, resolvedAgent, err)
 			s.respondError(w, http.StatusBadGateway, "credential_resolution_failed", "Unable to obtain upstream credential from OpenBao")
 			return
 		}
+	}
+	if realCredential == "" && res.CredentialRequired {
+		log.Printf("[EGRESS] No credential available for agent %s target %s", resolvedAgent, targetAlias)
+		s.respondError(w, http.StatusBadGateway, "credential_resolution_failed", fmt.Sprintf("No upstream credential is available for target %q", targetAlias))
+		return
 	}
 
 	// 6. Build outgoing request
@@ -395,7 +390,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 	// Strip gateway-specific headers. The agent's placeholder token never leaves the gateway,
 	// also when the target takes its key in another header (x-api-key, x-goog-api-key).
 	outReq.Header.Del("X-OpenWAF-Agent")
-	if agentCfg.Token != "" {
+	if res.DropAuthorization {
 		outReq.Header.Del("Authorization")
 	}
 
@@ -456,4 +451,16 @@ func (s *Server) respondError(w http.ResponseWriter, code int, errCode, msg stri
 		"error":   errCode,
 		"message": msg,
 	})
+}
+
+// getSecret reads ref from the secret store, from its own KV mount when it names one.
+func (s *Server) getSecret(ctx context.Context, ref CredRef) (string, error) {
+	if ref.Mount == "" {
+		return s.vault.GetSecret(ctx, ref.Path, ref.Key)
+	}
+	mp, ok := s.vault.(MountSecretProvider)
+	if !ok {
+		return "", errors.New("secret provider cannot read from an explicit kv mount")
+	}
+	return mp.GetSecretAt(ctx, ref.Mount, ref.Path, ref.Key)
 }

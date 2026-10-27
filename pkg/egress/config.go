@@ -36,6 +36,7 @@ type TargetConfig struct {
 // AgentConfig defines egress security policy for an AI agent.
 type AgentConfig struct {
 	Token             string             `json:"token"`              // expected placeholder or bearer token
+	TokenSHA256       string             `json:"token_sha256"`       // or: hex SHA-256 of the token (keeps the token out of the file)
 	AllowedTargets    []string           `json:"allowed_targets"`    // e.g. ["openrouter", "openai"]
 	CredentialMapping map[string]CredRef `json:"credential_mapping"` // target_alias -> secret in OpenBao
 	EnforceInjection  bool               `json:"enforce_injection"`  // scan request body for prompt-injection attacks
@@ -46,6 +47,9 @@ type AgentConfig struct {
 type CredRef struct {
 	Path string `json:"path"` // e.g. "agents/support" → GET /v1/<kv_mount>/data/agents/support
 	Key  string `json:"key"`  // e.g. "OPENROUTER_API_KEY"
+	// Mount overrides openbao.kv_mount for this secret (set by a Resolver, e.g. from the
+	// control-plane document; not read from the config file).
+	Mount string `json:"-"`
 }
 
 // LoadConfig reads and parses a JSON config file.
@@ -76,6 +80,9 @@ func LoadConfig(path string) (*Config, error) {
 			t.AuthPrefix = "Bearer "
 		}
 		cfg.Targets[k] = t
+	}
+	if err := cfg.validateAgents(); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil
