@@ -54,11 +54,12 @@ func main() {
 	srv := egress.NewServer(cfg, vault)
 
 	httpServer := &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      srv,
-		ReadTimeout:  120 * time.Second,
-		WriteTimeout: 300 * time.Second, // Long timeout for streaming LLMs
-		IdleTimeout:  120 * time.Second,
+		Addr:              cfg.ListenAddr,
+		Handler:           srv,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       120 * time.Second,
+		WriteTimeout:      egress.UpstreamTimeout, // a streamed generation is one write window
+		IdleTimeout:       120 * time.Second,
 	}
 
 	stop := make(chan os.Signal, 1)

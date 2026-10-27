@@ -24,12 +24,71 @@ const maxBodyBytes = 8 << 20
 // (data:text/plain;base64,…) are not matched: they stay inspected.
 var reMediaDataURI = regexp.MustCompile(`data:(?:image|audio|video)/[A-Za-z0-9.+-]{1,40};base64,[A-Za-z0-9+/=\\]+`)
 
-// withoutMediaData replaces inline media payloads with a short marker.
-func withoutMediaData(s string) string {
-	if !strings.Contains(s, ";base64,") {
+// minBinaryDataLen: a JSON "data" member holding at least this much bare base64 is a binary
+// payload (OpenAI input_audio, Gemini inlineData / inline_data, Anthropic base64 image or
+// document sources), not inspected text. Chat text travels in "content" / "text" members.
+const minBinaryDataLen = 1024
+
+// stripBinaryDataFields replaces the value of every "data" member of at least minBinaryDataLen
+// base64 characters (JSON-escaped slashes allowed) with "omitted", in one linear pass.
+func stripBinaryDataFields(s string) string {
+	const key = `"data"`
+	var b strings.Builder
+	last := 0 // s[last:] is not yet copied to b
+	for i := 0; ; {
+		k := strings.Index(s[i:], key)
+		if k < 0 {
+			break
+		}
+		j := skipJSONSpace(s, i+k+len(key))
+		if j >= len(s) || s[j] != ':' {
+			i = j
+			continue
+		}
+		j = skipJSONSpace(s, j+1)
+		if j >= len(s) || s[j] != '"' {
+			i = j
+			continue
+		}
+		start := j + 1
+		end := start
+		for end < len(s) && isBase64JSONByte(s[end]) {
+			end++
+		}
+		if end < len(s) && s[end] == '"' && end-start >= minBinaryDataLen {
+			b.WriteString(s[last:start])
+			b.WriteString("omitted")
+			last = end
+		}
+		i = end
+	}
+	if last == 0 {
 		return s
 	}
-	return reMediaDataURI.ReplaceAllString(s, "data:media;base64,omitted")
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+func skipJSONSpace(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+func isBase64JSONByte(c byte) bool {
+	return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '+' || c == '/' || c == '=' || c == '\\'
+}
+
+// withoutMediaData replaces inline media payloads with a short marker.
+func withoutMediaData(s string) string {
+	if strings.Contains(s, ";base64,") {
+		s = reMediaDataURI.ReplaceAllString(s, "data:media;base64,omitted")
+	}
+	if strings.Contains(s, `"data"`) {
+		s = stripBinaryDataFields(s)
+	}
+	return s
 }
 
 // Server is the OpenWAF Egress Gateway HTTP handler.
@@ -40,6 +99,14 @@ type Server struct {
 	logOutput io.Writer
 }
 
+// upstreamHeaderTimeout bounds the wait for the provider's response headers; UpstreamTimeout
+// bounds a whole exchange, a streamed response included (cmd/egress uses it as the server
+// write timeout too). The agent disconnecting cancels the upstream request before either.
+const (
+	upstreamHeaderTimeout = 5 * time.Minute
+	UpstreamTimeout       = 15 * time.Minute
+)
+
 // NewServer initializes a new Egress Gateway server.
 func NewServer(cfg *Config, vault SecretProvider) *Server {
 	transport := &http.Transport{
@@ -47,7 +114,8 @@ func NewServer(cfg *Config, vault SecretProvider) *Server {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
+		// Non-streaming reasoning, image and video generations answer after minutes.
+		ResponseHeaderTimeout: upstreamHeaderTimeout,
 	}
 
 	return &Server{
@@ -55,7 +123,7 @@ func NewServer(cfg *Config, vault SecretProvider) *Server {
 		vault: vault,
 		client: &http.Client{
 			Transport: transport,
-			Timeout:   300 * time.Second, // Long timeout for LLM generation
+			Timeout:   UpstreamTimeout, // whole exchange, streamed body included
 			// Never follow a redirect: the 3xx goes back to the agent as is. Following it
 			// would resend the injected credential (Go only strips Authorization and Cookie
 			// across hosts, never a custom header such as x-api-key) to a destination that
@@ -324,8 +392,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 		}
 	}
 
-	// Strip gateway-specific headers
+	// Strip gateway-specific headers. The agent's placeholder token never leaves the gateway,
+	// also when the target takes its key in another header (x-api-key, x-goog-api-key).
 	outReq.Header.Del("X-OpenWAF-Agent")
+	if agentCfg.Token != "" {
+		outReq.Header.Del("Authorization")
+	}
 
 	// Inject real credential
 	if realCredential != "" {

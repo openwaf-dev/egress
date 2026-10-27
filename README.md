@@ -99,7 +99,8 @@ See [`config.example.json`](config.example.json).
   },
   "targets": {
     "openrouter": { "base_url": "https://openrouter.ai/api/v1", "host": "openrouter.ai" },
-    "anthropic": { "base_url": "https://api.anthropic.com/v1", "host": "api.anthropic.com", "auth_header": "x-api-key" }
+    "anthropic": { "base_url": "https://api.anthropic.com/v1", "host": "api.anthropic.com", "auth_header": "x-api-key" },
+    "gemini": { "base_url": "https://generativelanguage.googleapis.com", "host": "generativelanguage.googleapis.com", "auth_header": "x-goog-api-key" }
   },
   "agents": {
     "my-support-agent": {
@@ -120,9 +121,12 @@ See [`config.example.json`](config.example.json).
 | `listen_addr` | `127.0.0.1:8070` | The container image binds `0.0.0.0:8070`; publish it on loopback or a private network only. |
 | `openbao.kv_mount` | `kv` | KV v2 mount. A secret is read from `GET /v1/<kv_mount>/data/<path>` (Vault's default mount is `secret`). |
 | `openbao.approle_file` | — | JSON `{"role_id": "…", "secret_id": "…"}`; or set `role_id` / `secret_id` inline. |
-| `targets.*.auth_header` | `Authorization` | Header that receives the key. |
+| `targets.*.auth_header` | `Authorization` | Header that receives the key. The agent's placeholder token (`Authorization: Bearer OWE_…`) is always removed, also for `x-api-key` / `x-goog-api-key` targets. Keys in the query string (`?key=`) are not injected: use the header. |
 | `targets.*.auth_prefix` | `Bearer ` for `Authorization`, none otherwise | |
 | `agents.*.token` | — | Use a long random value per agent; the example token is public. |
+
+Upstream timeouts: 5 min for the provider's response headers (non-streaming reasoning, image
+and video generations), 15 min for a whole exchange including a streamed body.
 
 Blocked requests get JSON such as:
 
