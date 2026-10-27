@@ -1,0 +1,56 @@
+{
+  "listen_addr": "0.0.0.0:8070",
+  "openbao": {
+    "addr": "https://vault.example.com:8200",
+    "ca_file": "",
+    "approle_file": "",
+    "kv_mount": "secret"
+  },
+  "targets": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "host": "openrouter.ai",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer "
+    },
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "host": "api.openai.com",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer "
+    },
+    "anthropic": {
+      "base_url": "https://api.anthropic.com/v1",
+      "host": "api.anthropic.com",
+      "auth_header": "x-api-key",
+      "auth_prefix": ""
+    },
+    "huggingface": {
+      "base_url": "https://router.huggingface.co/v1",
+      "host": "router.huggingface.co",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer "
+    }
+  },
+  "agents": {
+    "my-support-agent": {
+      "token": "OWE_TOKEN_SUPPORT_AGENT",
+      "allowed_targets": [
+        "openrouter",
+        "openai"
+      ],
+      "credential_mapping": {
+        "openrouter": {
+          "path": "agents/support",
+          "key": "OPENROUTER_API_KEY"
+        },
+        "openai": {
+          "path": "agents/support",
+          "key": "OPENAI_API_KEY"
+        }
+      },
+      "enforce_injection": true,
+      "block_dlp": true
+    }
+  }
+}

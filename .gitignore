@@ -1,0 +1,33 @@
+# Binaries
+/egress
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+
+# Environment & Secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Agent & Operator files (Strictly ignored)
+AGENT.md
+CLAUDE.md
+.claude/
+.omp/
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+.DS_Store

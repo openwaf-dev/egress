@@ -1,0 +1,18 @@
+services:
+  egress:
+    build: .
+    image: ghcr.io/openwaf-dev/egress:latest
+    container_name: openwaf-egress
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8070:8070"
+    volumes:
+      - ./config.json:/app/config.json:ro
+    environment:
+      - GODEBUG=netdns=go
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8070/health > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
