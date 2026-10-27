@@ -124,6 +124,7 @@ See [`config.example.json`](config.example.json).
 | `targets.*.auth_header` | `Authorization` | Header that receives the key. The agent's placeholder token (`Authorization: Bearer OWE_…`) is always removed, also for `x-api-key` / `x-goog-api-key` targets. Keys in the query string (`?key=`) are not injected: use the header. |
 | `targets.*.auth_prefix` | `Bearer ` for `Authorization`, none otherwise | |
 | `agents.*.token` | — | Use a long random value per agent; the example token is public. |
+| `agents.*.token_sha256` | — | Instead of `token`: the lowercase hex SHA-256 of the token, so the file holds no token. Tokens are compared in constant time. |
 
 Upstream timeouts: 5 min for the provider's response headers (non-streaming reasoning, image
 and video generations), 15 min for a whole exchange including a streamed body.
@@ -138,6 +139,34 @@ Blocked requests get JSON such as:
   "detections": [{ "ID": "pi.override.en", "Label": "Instruction override", "Snippet": "Ignore all previous instructions" }]
 }
 ```
+
+## OpenWAF Cloud data plane mode
+
+The same binary can run as a hosted node of [OpenWAF Cloud](https://openwaf.dev): agents,
+targets and policies then come from the control plane instead of `config.json`, and every
+refused request is reported to the organization's egress events. The config file still sets
+`listen_addr` and the OpenBao connection.
+
+```bash
+# Once: create the node key and register the printed public key (operator, POST /v1/egress/nodes).
+egress keygen -out /etc/openwaf/egress-node.key
+
+egress -config /etc/openwaf/egress.json \
+  -control-plane https://app.openwaf.dev -node-id egress-1 \
+  -node-key /etc/openwaf/egress-node.key -poll-interval 15s
+```
+
+| Flag | Environment | Notes |
+|---|---|---|
+| `-control-plane` | `OPENWAF_CONTROL_PLANE` | Control plane URL (https). Enables this mode. |
+| `-node-id` | `OPENWAF_NODE_ID` | Node id registered with the public key. |
+| `-node-key` | `OPENWAF_NODE_KEY` | ed25519 PKCS#8 PEM private key written by `egress keygen` (mode 0600). |
+| `-poll-interval` | `OPENWAF_POLL_INTERVAL` | Configuration poll interval, default `15s`. |
+
+In this mode an agent is identified by its token (looked up by SHA-256) and must call
+`/v1/agent/<its name>/proxy/<target>/…`; the agent token is never forwarded upstream, and a
+target without a stored credential is refused. The protocol (request signing, configuration
+document, event batches) is described in [docs/control-plane.md](docs/control-plane.md).
 
 ## Security notes
 
@@ -172,6 +201,14 @@ OpenBao o HashiCorp Vault, la inyecta y reenvía la petición con streaming.
   fuentes base64 de Anthropic); el resto del texto debe caber en 1 MiB o se rechaza con `413`.
   Nunca se reenvía nada sin inspeccionar.
 - **Rendimiento:** 84 µs por una petición de chat de 4 KB (Mac con Apple Silicon, darwin/arm64).
+
+**Modo plano de datos de OpenWAF Cloud:** con `-control-plane https://app.openwaf.dev`,
+`-node-id` y `-node-key` (o `OPENWAF_CONTROL_PLANE`, `OPENWAF_NODE_ID`, `OPENWAF_NODE_KEY`;
+`-poll-interval`/`OPENWAF_POLL_INTERVAL`, 15 s por defecto) la pasarela toma agentes, destinos y
+políticas del panel de control en lugar de `config.json` (que sigue fijando `listen_addr` y
+OpenBao) y le envía cada petición bloqueada. `egress keygen -out node.key` crea la clave del nodo
+e imprime la clave pública que el operador registra. Detalles del protocolo en
+[docs/control-plane.md](docs/control-plane.md).
 
 Expón la pasarela solo en loopback o en una red privada. Vulnerabilidades:
 **security@openwaf.dev**.
