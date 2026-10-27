@@ -42,7 +42,7 @@ key from OpenBao or HashiCorp Vault, inject it, and forward the request with str
 | Prompt injection | 27 deterministic detectors, English and Spanish: 21 pattern detectors (instruction override, system-prompt extraction, jailbreak personas and modes, forged system/tool/turn messages, chat-template tokens, concealment orders, tool invocation and approval bypass, memory poisoning, destructive commands, remote-script piping, secret harvesting, host-data and rendered-link exfiltration, spend amplification) plus 6 for hidden or encoded text (zero-width and tag characters, HTML comments, CSS-hidden text, base64, percent/hex). No model call. |
 | Data leaks | Payment card numbers (13–19 digits, Luhn-valid), PEM private keys, AWS access key IDs, OpenAI-style `sk-` keys and GitHub tokens. |
 | SSRF | The target host must resolve only to public addresses (loopback, RFC 1918, CGNAT, link-local incl. `169.254.169.254`, multicast, reserved and the IPv6 equivalents are refused). Upstream redirects are never followed: the `3xx` goes back to the agent, so the credential never reaches a host outside the allowlist. |
-| Partial inspection | Inline images, audio and video (`data:image/…;base64,…`) are not inspected text; everything else must fit the 1 MiB inspection window or the request is refused with `413`. Nothing is forwarded uninspected or cut; bodies are capped at 8 MiB. |
+| Partial inspection | Inline images, audio and video are not inspected text: `data:image/…;base64,…` URIs and JSON `"data"` members of ≥ 1 KiB bare base64 (OpenAI `input_audio`, Gemini `inlineData`, Anthropic base64 sources). Everything else must fit the 1 MiB inspection window or the request is refused with `413`. Nothing is forwarded uninspected or cut; bodies are capped at 8 MiB. |
 
 Detection is pattern matching: it stops known injection and exfiltration shapes, it does not prove
 a request is safe.
@@ -167,8 +167,10 @@ OpenBao o HashiCorp Vault, la inyecta y reenvía la petición con streaming.
   de OpenAI y tokens de GitHub.
 - **SSRF:** el destino solo puede resolver a direcciones públicas, y la pasarela nunca sigue una
   redirección del proveedor: el `3xx` vuelve al agente y la clave no sale hacia otro host.
-- **Cuerpos grandes:** las imágenes, audios y vídeos en línea (`data:image/…;base64,…`) no cuentan;
-  el resto del texto debe caber en 1 MiB o se rechaza con `413`. Nunca se reenvía nada sin inspeccionar.
+- **Cuerpos grandes:** las imágenes, audios y vídeos en línea no cuentan (URI `data:image/…;base64,…`
+  y miembros JSON `"data"` con ≥ 1 KiB de base64: `input_audio` de OpenAI, `inlineData` de Gemini,
+  fuentes base64 de Anthropic); el resto del texto debe caber en 1 MiB o se rechaza con `413`.
+  Nunca se reenvía nada sin inspeccionar.
 - **Rendimiento:** 84 µs por una petición de chat de 4 KB (Mac con Apple Silicon, darwin/arm64).
 
 Expón la pasarela solo en loopback o en una red privada. Vulnerabilidades:
