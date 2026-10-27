@@ -87,3 +87,38 @@ func TestBlockEvents(t *testing.T) {
 		t.Errorf("401 must not produce an event: code %d, events %d", rec.Code, len(sink.events))
 	}
 }
+
+// X-Real-IP gives the caller address only from a trusted proxy; anyone else cannot spoof it.
+func TestBlockEventClientIPBehindTrustedProxy(t *testing.T) {
+	srv, upstream, _ := testSetup()
+	defer upstream.Close()
+	sink := &recordingSink{}
+	WithEventSink(sink)(srv)
+	proxies, err := ParsePrefixes("127.0.0.1, ::1, 10.1.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	WithTrustedProxies(proxies)(srv)
+	if _, err := ParsePrefixes("localhost"); err == nil {
+		t.Error("ParsePrefixes accepted a name")
+	}
+	for _, c := range []struct{ peer, realIP, want string }{
+		{"127.0.0.1:4000", "203.0.113.9", "203.0.113.9"},
+		{"[::1]:4000", "2001:db8::5", "2001:db8::5"},
+		{"10.1.2.3:4000", "198.51.100.4", "198.51.100.4"},
+		{"127.0.0.1:4000", "203.0.113.9, 10.0.0.1", "127.0.0.1"},
+		{"127.0.0.1:4000", "", "127.0.0.1"},
+		{"198.51.100.20:4000", "203.0.113.9", "198.51.100.20"},
+	} {
+		req := httptest.NewRequest("POST", "/v1/proxy/forbidden_site/x", strings.NewReader("{}"))
+		req.RemoteAddr = c.peer
+		req.Header.Set("Authorization", "Bearer OWE_TOKEN_SUPPORT_AGENT")
+		if c.realIP != "" {
+			req.Header.Set("X-Real-IP", c.realIP)
+		}
+		srv.ServeHTTP(httptest.NewRecorder(), req)
+		if got := sink.events[len(sink.events)-1].IP; got != c.want {
+			t.Errorf("peer %s X-Real-IP %q: IP %s, want %s", c.peer, c.realIP, got, c.want)
+		}
+	}
+}

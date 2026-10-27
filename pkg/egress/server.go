@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
@@ -95,11 +96,13 @@ func withoutMediaData(s string) string {
 
 // Server is the OpenWAF Egress Gateway HTTP handler.
 type Server struct {
-	resolver  Resolver
-	vault     SecretProvider
-	events    EventSink
-	client    *http.Client
-	logOutput io.Writer
+	resolver Resolver
+	vault    SecretProvider
+	events   EventSink
+	// trustedProxies give the caller address of block events in X-Real-IP (WithTrustedProxies).
+	trustedProxies []netip.Prefix
+	client         *http.Client
+	logOutput      io.Writer
 }
 
 // upstreamHeaderTimeout bounds the wait for the provider's response headers; UpstreamTimeout

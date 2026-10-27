@@ -1,9 +1,11 @@
 package egress
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -61,12 +63,53 @@ func (LogSink) Block(ev BlockEvent) {
 		ev.Status, ev.Code, tenant, ev.AgentName, ev.Target, ev.Method, ev.Path, ev.IP, strings.Join(ev.Detections, ","))
 }
 
-// clientIP returns the connection peer address of r.
-func clientIP(r *http.Request) string {
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+// WithTrustedProxies makes the gateway take the caller address of block events from X-Real-IP (one address) when
+// the connection comes from one of proxies, e.g. a reverse proxy on loopback in front of the gateway. Any other peer,
+// or an X-Real-IP that is not a single IP address, gives the connection address.
+func WithTrustedProxies(proxies []netip.Prefix) Option {
+	return func(s *Server) { s.trustedProxies = proxies }
+}
+
+// ParsePrefixes reads a comma-separated list of CIDR prefixes or single addresses.
+func ParsePrefixes(list string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, f := range strings.Split(list, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if a, err := netip.ParseAddr(f); err == nil {
+			out = append(out, netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen()))
+			continue
+		}
+		p, err := netip.ParsePrefix(f)
+		if err != nil {
+			return nil, fmt.Errorf("trusted proxy %q is not an IP address or CIDR prefix", f)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
+}
+
+// clientIP returns the caller address of r: the connection peer, or X-Real-IP from a trusted proxy.
+func (s *Server) clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil {
 		return host
 	}
-	return r.RemoteAddr
+	for _, p := range s.trustedProxies {
+		if p.Contains(peer.Unmap()) {
+			if real, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Real-IP"))); err == nil {
+				return real.Unmap().String()
+			}
+			break
+		}
+	}
+	return host
 }
 
 // emitBlock reports a refused request of the agent identified by res.
@@ -84,7 +127,7 @@ func (s *Server) emitBlock(r *http.Request, res *Resolution, target, subPath str
 		Status:     status,
 		Method:     r.Method,
 		Path:       subPath,
-		IP:         clientIP(r),
+		IP:         s.clientIP(r),
 		Detections: detections,
 	})
 }

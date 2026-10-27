@@ -39,6 +39,7 @@ func main() {
 	controlPlane := flag.String("control-plane", os.Getenv("OPENWAF_CONTROL_PLANE"), "OpenWAF Cloud URL (e.g. https://app.openwaf.dev): take agents and targets from the control plane instead of the config file (env OPENWAF_CONTROL_PLANE)")
 	nodeID := flag.String("node-id", os.Getenv("OPENWAF_NODE_ID"), "Node id registered in OpenWAF Cloud (env OPENWAF_NODE_ID)")
 	nodeKey := flag.String("node-key", os.Getenv("OPENWAF_NODE_KEY"), "Path to the node's ed25519 PKCS#8 PEM private key (env OPENWAF_NODE_KEY)")
+	trusted := flag.String("trusted-proxies", os.Getenv("OPENWAF_TRUSTED_PROXIES"), "Comma-separated addresses or CIDRs of reverse proxies in front of the gateway whose X-Real-IP gives the caller address of block events, e.g. 127.0.0.1 (env OPENWAF_TRUSTED_PROXIES)")
 	pollInterval := flag.Duration("poll-interval", pollDefault, "How often to poll the control plane configuration (env OPENWAF_POLL_INTERVAL)")
 	flag.Parse()
 
@@ -78,10 +79,16 @@ func main() {
 		go func() { f(ctx); close(done) }()
 	}
 
+	proxies, err := egress.ParsePrefixes(*trusted)
+	if err != nil {
+		log.Fatalf("[EGRESS] -trusted-proxies: %v", err)
+	}
+	opts := []egress.Option{egress.WithTrustedProxies(proxies)}
+
 	var srv *egress.Server
 	var stats egress.ResolverStats = cfg
 	if *controlPlane == "" {
-		srv = egress.NewServer(cfg, vault)
+		srv = egress.NewServer(cfg, vault, opts...)
 	} else {
 		if *nodeID == "" || *nodeKey == "" {
 			log.Fatal("[EGRESS] -control-plane needs -node-id and -node-key")
@@ -114,7 +121,7 @@ func main() {
 		sink := controlplane.NewEventSink(client, controlplane.EventSinkOptions{})
 		run(resolver.Run)
 		run(sink.Run)
-		srv = egress.NewServerWithResolver(resolver, vault, egress.WithEventSink(sink))
+		srv = egress.NewServerWithResolver(resolver, vault, append(opts, egress.WithEventSink(sink))...)
 		stats = resolver
 		log.Printf("[EGRESS] Control plane %s as node %s (key id %s), polling every %s", *controlPlane, signer.NodeID(), signer.KeyID(), *pollInterval)
 	}

@@ -162,6 +162,7 @@ egress -config /etc/openwaf/egress.json \
 | `-node-id` | `OPENWAF_NODE_ID` | Node id registered with the public key. |
 | `-node-key` | `OPENWAF_NODE_KEY` | ed25519 PKCS#8 PEM private key written by `egress keygen` (mode 0600). |
 | `-poll-interval` | `OPENWAF_POLL_INTERVAL` | Configuration poll interval, default `15s`. |
+| `-trusted-proxies` | `OPENWAF_TRUSTED_PROXIES` | Comma-separated addresses or CIDRs of reverse proxies in front of the gateway (e.g. `127.0.0.1`): their `X-Real-IP` is the caller address of block events. Works in both modes; default none (the connection address). |
 
 In this mode an agent is identified by its token (looked up by SHA-256) and must call
 `/v1/agent/<its name>/proxy/<target>/…`; the agent token is never forwarded upstream, and a
@@ -206,7 +207,8 @@ OpenBao o HashiCorp Vault, la inyecta y reenvía la petición con streaming.
 `-node-id` y `-node-key` (o `OPENWAF_CONTROL_PLANE`, `OPENWAF_NODE_ID`, `OPENWAF_NODE_KEY`;
 `-poll-interval`/`OPENWAF_POLL_INTERVAL`, 15 s por defecto) la pasarela toma agentes, destinos y
 políticas del panel de control en lugar de `config.json` (que sigue fijando `listen_addr` y
-OpenBao) y le envía cada petición bloqueada. `egress keygen -out node.key` crea la clave del nodo
+OpenBao) y le envía cada petición bloqueada. Detrás de un proxy inverso, `-trusted-proxies 127.0.0.1`
+(`OPENWAF_TRUSTED_PROXIES`) toma la IP del cliente de su `X-Real-IP`. `egress keygen -out node.key` crea la clave del nodo
 e imprime la clave pública que el operador registra. Detalles del protocolo en
 [docs/control-plane.md](docs/control-plane.md).
 
