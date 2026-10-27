@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,6 +18,19 @@ import (
 
 // maxBodyBytes is the largest request body the gateway forwards (agents without inspection).
 const maxBodyBytes = 8 << 20
+
+// reMediaDataURI: base64 inline images, audio and video, e.g. an OpenAI-style image_url
+// "data:image/jpeg;base64,…" (backslashes allow JSON-escaped slashes). Text media types
+// (data:text/plain;base64,…) are not matched: they stay inspected.
+var reMediaDataURI = regexp.MustCompile(`data:(?:image|audio|video)/[A-Za-z0-9.+-]{1,40};base64,[A-Za-z0-9+/=\\]+`)
+
+// withoutMediaData replaces inline media payloads with a short marker.
+func withoutMediaData(s string) string {
+	if !strings.Contains(s, ";base64,") {
+		return s
+	}
+	return reMediaDataURI.ReplaceAllString(s, "data:media;base64,omitted")
+}
 
 // Server is the OpenWAF Egress Gateway HTTP handler.
 type Server struct {
@@ -202,23 +216,29 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 			return
 		}
 	}
+	// Inline images, audio and video (data:image/…;base64,…) are binary the detectors cannot
+	// read; they are left out of the inspected text, so a chat request with a photo is not
+	// refused for its size. The rest of the body must fit the inspection window.
 	inspect := agentCfg.EnforceInjection || agentCfg.BlockDLP
-	if len(bodyBytes) > maxBodyBytes || inspect && len(bodyBytes) > aiagents.MaxInspectBytes {
+	bodyStr := string(bodyBytes)
+	inspected := bodyStr
+	if inspect {
+		inspected = withoutMediaData(bodyStr)
+	}
+	if len(bodyBytes) > maxBodyBytes || inspect && len(inspected) > aiagents.MaxInspectBytes {
 		limit := maxBodyBytes
-		if inspect {
+		if inspect && len(bodyBytes) <= maxBodyBytes {
 			limit = aiagents.MaxInspectBytes
 		}
 		s.respondError(w, http.StatusRequestEntityTooLarge, "body_too_large",
-			fmt.Sprintf("Request body exceeds %d bytes (the inspection window when injection or DLP checks are on)", limit))
+			fmt.Sprintf("Request body exceeds %d bytes (text outside inline media counts against the inspection window when injection or DLP checks are on)", limit))
 		return
 	}
 
 	if len(bodyBytes) > 0 {
-		bodyStr := string(bodyBytes)
-
 		// Prompt Injection check using OpenWAF's internal/aiagents.Detect
 		if agentCfg.EnforceInjection {
-			detections := aiagents.Detect(bodyStr)
+			detections := aiagents.Detect(inspected)
 			var injectionFindings []aiagents.Detection
 			for _, d := range detections {
 				if !aiagents.IsCostDetection(d) {
@@ -241,7 +261,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 
 		// DLP check
 		if agentCfg.BlockDLP {
-			dlpMatches := ScanDLP(bodyStr)
+			dlpMatches := ScanDLP(inspected)
 			if len(dlpMatches) > 0 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)

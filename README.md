@@ -42,7 +42,7 @@ key from OpenBao or HashiCorp Vault, inject it, and forward the request with str
 | Prompt injection | 27 deterministic detectors, English and Spanish: 21 pattern detectors (instruction override, system-prompt extraction, jailbreak personas and modes, forged system/tool/turn messages, chat-template tokens, concealment orders, tool invocation and approval bypass, memory poisoning, destructive commands, remote-script piping, secret harvesting, host-data and rendered-link exfiltration, spend amplification) plus 6 for hidden or encoded text (zero-width and tag characters, HTML comments, CSS-hidden text, base64, percent/hex). No model call. |
 | Data leaks | Payment card numbers (13–19 digits, Luhn-valid), PEM private keys, AWS access key IDs, OpenAI-style `sk-` keys and GitHub tokens. |
 | SSRF | The target host must resolve only to public addresses (loopback, RFC 1918, CGNAT, link-local incl. `169.254.169.254`, multicast, reserved and the IPv6 equivalents are refused). |
-| Partial inspection | With inspection on, bodies over the 1 MiB inspection window are refused with `413`; nothing is forwarded uninspected or cut. |
+| Partial inspection | Inline images, audio and video (`data:image/…;base64,…`) are not inspected text; everything else must fit the 1 MiB inspection window or the request is refused with `413`. Nothing is forwarded uninspected or cut; bodies are capped at 8 MiB. |
 
 Detection is pattern matching: it stops known injection and exfiltration shapes, it does not prove
 a request is safe.
@@ -162,8 +162,8 @@ OpenBao o HashiCorp Vault, la inyecta y reenvía la petición con streaming.
 - **Fuga de datos:** tarjetas válidas por Luhn, claves privadas PEM, claves de AWS, claves `sk-`
   de OpenAI y tokens de GitHub.
 - **SSRF:** el destino solo puede resolver a direcciones públicas.
-- **Cuerpos grandes:** con la inspección activa, un cuerpo de más de 1 MiB se rechaza con `413`;
-  nunca se reenvía nada sin inspeccionar.
+- **Cuerpos grandes:** las imágenes, audios y vídeos en línea (`data:image/…;base64,…`) no cuentan;
+  el resto del texto debe caber en 1 MiB o se rechaza con `413`. Nunca se reenvía nada sin inspeccionar.
 - **Rendimiento:** 84 µs por una petición de chat de 4 KB (Mac con Apple Silicon, darwin/arm64).
 
 Expón la pasarela solo en loopback o en una red privada. Vulnerabilidades:
