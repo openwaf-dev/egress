@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,12 +14,21 @@ import (
 	"github.com/openwaf-dev/egress/pkg/egress"
 )
 
+// version is set at build time: -ldflags "-X main.version=v0.1.0".
+var version = "dev"
+
 func main() {
 	configPath := flag.String("config", "config.json", "Path to Egress Gateway config JSON (or /etc/openwaf/egress.json)")
 	listenAddr := flag.String("addr", "", "Override listening address (e.g. :8070)")
+	showVersion := flag.Bool("version", false, "Print the version and exit")
 	flag.Parse()
 
-	log.Println("[EGRESS] Starting OpenWAF Egress Gateway...")
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
+
+	log.Printf("[EGRESS] Starting OpenWAF Egress Gateway %s...", version)
 
 	cfg, err := egress.LoadConfig(*configPath)
 	if err != nil {
