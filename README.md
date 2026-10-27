@@ -41,7 +41,7 @@ key from OpenBao or HashiCorp Vault, inject it, and forward the request with str
 | Provider keys in agent containers | Agents carry `OWE_TOKEN_…` placeholders. The real key is read from KV v2 (OpenBao or Vault, AppRole login, 5 min cache) and set on the outgoing request only. |
 | Prompt injection | 27 deterministic detectors, English and Spanish: 21 pattern detectors (instruction override, system-prompt extraction, jailbreak personas and modes, forged system/tool/turn messages, chat-template tokens, concealment orders, tool invocation and approval bypass, memory poisoning, destructive commands, remote-script piping, secret harvesting, host-data and rendered-link exfiltration, spend amplification) plus 6 for hidden or encoded text (zero-width and tag characters, HTML comments, CSS-hidden text, base64, percent/hex). No model call. |
 | Data leaks | Payment card numbers (13–19 digits, Luhn-valid), PEM private keys, AWS access key IDs, OpenAI-style `sk-` keys and GitHub tokens. |
-| SSRF | The target host must resolve only to public addresses (loopback, RFC 1918, CGNAT, link-local incl. `169.254.169.254`, multicast, reserved and the IPv6 equivalents are refused). Upstream redirects are never followed: the `3xx` goes back to the agent, so the credential never reaches a host outside the allowlist. |
+| SSRF | The target host must resolve only to public addresses (loopback, RFC 1918, CGNAT, link-local incl. `169.254.169.254`, multicast, reserved and the IPv6 equivalents are refused), and the address actually connected to is checked again, so a name that re-resolves to a private address is refused too. Upstream redirects are never followed: the `3xx` goes back to the agent, so the credential never reaches a host outside the allowlist. Error answers name no resolved address. |
 | Partial inspection | Inline images, audio and video are not inspected text: `data:image/…;base64,…` URIs and JSON `"data"` members of ≥ 1 KiB bare base64 (OpenAI `input_audio`, Gemini `inlineData`, Anthropic base64 sources). Everything else must fit the 1 MiB inspection window or the request is refused with `413`. Nothing is forwarded uninspected or cut; bodies are capped at 8 MiB. |
 
 Detection is pattern matching: it stops known injection and exfiltration shapes, it does not prove
@@ -162,12 +162,17 @@ egress -config /etc/openwaf/egress.json \
 | `-node-id` | `OPENWAF_NODE_ID` | Node id registered with the public key. |
 | `-node-key` | `OPENWAF_NODE_KEY` | ed25519 PKCS#8 PEM private key written by `egress keygen` (mode 0600). |
 | `-poll-interval` | `OPENWAF_POLL_INTERVAL` | Configuration poll interval, default `15s`. |
+| `-max-stale` | `OPENWAF_MAX_STALE` | How long the last configuration stays in force while the control plane cannot confirm it, default `10m`; then requests answer `503` until it can. |
 | `-trusted-proxies` | `OPENWAF_TRUSTED_PROXIES` | Comma-separated addresses or CIDRs of reverse proxies in front of the gateway (e.g. `127.0.0.1`): their `X-Real-IP` is the caller address of block events. Works in both modes; default none (the connection address). |
 
 In this mode an agent is identified by its token (looked up by SHA-256) and must call
 `/v1/agent/<its name>/proxy/<target>/…`; the agent token is never forwarded upstream, and a
-target without a stored credential is refused. The protocol (request signing, configuration
-document, event batches) is described in [docs/control-plane.md](docs/control-plane.md).
+target without a stored credential is refused. If the control plane refuses the node (`401`
+or `403`, e.g. revoked), its configuration is dropped at once. `/health` answers
+`503 {"status":"starting"}` while no usable configuration is in force, then
+`{"status":"ok","service":…,"version":…,"openbao":…}` without agent or target totals. The
+protocol (request signing, configuration document, event batches) is described in
+[docs/control-plane.md](docs/control-plane.md).
 
 ## Security notes
 
@@ -195,8 +200,9 @@ OpenBao o HashiCorp Vault, la inyecta y reenvía la petición con streaming.
   texto oculto o codificado), sin llamar a ningún modelo.
 - **Fuga de datos:** tarjetas válidas por Luhn, claves privadas PEM, claves de AWS, claves `sk-`
   de OpenAI y tokens de GitHub.
-- **SSRF:** el destino solo puede resolver a direcciones públicas, y la pasarela nunca sigue una
-  redirección del proveedor: el `3xx` vuelve al agente y la clave no sale hacia otro host.
+- **SSRF:** el destino solo puede resolver a direcciones públicas (también se comprueba la dirección
+  a la que se conecta de verdad), y la pasarela nunca sigue una redirección del proveedor: el `3xx`
+  vuelve al agente y la clave no sale hacia otro host.
 - **Cuerpos grandes:** las imágenes, audios y vídeos en línea no cuentan (URI `data:image/…;base64,…`
   y miembros JSON `"data"` con ≥ 1 KiB de base64: `input_audio` de OpenAI, `inlineData` de Gemini,
   fuentes base64 de Anthropic); el resto del texto debe caber en 1 MiB o se rechaza con `413`.
@@ -207,7 +213,10 @@ OpenBao o HashiCorp Vault, la inyecta y reenvía la petición con streaming.
 `-node-id` y `-node-key` (o `OPENWAF_CONTROL_PLANE`, `OPENWAF_NODE_ID`, `OPENWAF_NODE_KEY`;
 `-poll-interval`/`OPENWAF_POLL_INTERVAL`, 15 s por defecto) la pasarela toma agentes, destinos y
 políticas del panel de control en lugar de `config.json` (que sigue fijando `listen_addr` y
-OpenBao) y le envía cada petición bloqueada. Detrás de un proxy inverso, `-trusted-proxies 127.0.0.1`
+OpenBao) y le envía cada petición bloqueada. La última configuración sigue vigente como mucho
+`-max-stale` (`OPENWAF_MAX_STALE`, 10 min por defecto) sin confirmación del panel; después, y en
+cuanto el panel rechaza el nodo (`401`/`403`), las peticiones responden `503` y `/health` responde
+`503 {"status":"starting"}`. Detrás de un proxy inverso, `-trusted-proxies 127.0.0.1`
 (`OPENWAF_TRUSTED_PROXIES`) toma la IP del cliente de su `X-Real-IP`. `egress keygen -out node.key` crea la clave del nodo
 e imprime la clave pública que el operador registra. Detalles del protocolo en
 [docs/control-plane.md](docs/control-plane.md).
