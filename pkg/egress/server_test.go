@@ -130,6 +130,48 @@ func TestCredentialInjectionAndAllowlist(t *testing.T) {
 	}
 }
 
+// An upstream redirect to another host is handed back to the agent: the gateway never sends
+// the injected credential (here a custom x-api-key header, which Go would keep across hosts)
+// to a destination outside the target allowlist.
+func TestUpstreamRedirectNotFollowed(t *testing.T) {
+	var leaked int
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked++
+	}))
+	defer elsewhere.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/collect", http.StatusTemporaryRedirect)
+	}))
+	defer upstream.Close()
+
+	cfg := &Config{
+		Targets: map[string]TargetConfig{
+			"anthropic": {BaseURL: upstream.URL, Host: "api.anthropic.com", AuthHeader: "x-api-key"},
+		},
+		Agents: map[string]AgentConfig{
+			"support-agent": {
+				Token:             "OWE_TOKEN_SUPPORT_AGENT",
+				AllowedTargets:    []string{"anthropic"},
+				CredentialMapping: map[string]CredRef{"anthropic": {Path: "secret/data/agents/support", Key: "ANTHROPIC_API_KEY"}},
+			},
+		},
+	}
+	vault := &mockVault{secrets: map[string]string{"secret/data/agents/support:ANTHROPIC_API_KEY": "sk-ant-REAL"}}
+	srv := NewServer(cfg, vault)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/proxy/anthropic/v1/messages", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("Authorization", "Bearer OWE_TOKEN_SUPPORT_AGENT")
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected the 307 relayed to the agent, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if leaked != 0 {
+		t.Fatalf("gateway followed the redirect %d time(s) with the credential", leaked)
+	}
+}
+
 func TestAgentAuthentication(t *testing.T) {
 	srv, upstream, _ := testSetup()
 	defer upstream.Close()

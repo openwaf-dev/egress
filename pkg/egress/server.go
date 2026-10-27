@@ -56,6 +56,11 @@ func NewServer(cfg *Config, vault SecretProvider) *Server {
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   300 * time.Second, // Long timeout for LLM generation
+			// Never follow a redirect: the 3xx goes back to the agent as is. Following it
+			// would resend the injected credential (Go only strips Authorization and Cookie
+			// across hosts, never a custom header such as x-api-key) to a destination that
+			// skipped the target allowlist and the SSRF check.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 }
