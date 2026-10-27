@@ -78,7 +78,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("[EGRESS] -trusted-proxies: %v", err)
 	}
-	opts := []egress.Option{egress.WithTrustedProxies(proxies)}
+	opts := []egress.Option{egress.WithTrustedProxies(proxies), egress.WithVersion(version)}
 
 	var srv *egress.Server
 	var stats egress.ResolverStats = cfg

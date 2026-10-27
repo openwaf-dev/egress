@@ -107,6 +107,8 @@ type Server struct {
 	logOutput      io.Writer
 	// allowPrivateUpstream lifts the dial-time address check (tests with a loopback upstream).
 	allowPrivateUpstream bool
+	// version is reported by /health (WithVersion; "dev" when unset).
+	version string
 }
 
 // upstreamHeaderTimeout bounds the wait for the provider's response headers; UpstreamTimeout
@@ -120,6 +122,11 @@ const (
 // Option configures a Server.
 type Option func(*Server)
 
+// WithVersion sets the version /health reports (cmd/egress passes its build version).
+func WithVersion(v string) Option {
+	return func(s *Server) { s.version = v }
+}
+
 // NewServer initializes a new Egress Gateway server for a static config file.
 func NewServer(cfg *Config, vault SecretProvider, opts ...Option) *Server {
 	return NewServerWithResolver(cfg, vault, opts...)
@@ -132,6 +139,7 @@ func NewServerWithResolver(resolver Resolver, vault SecretProvider, opts ...Opti
 		resolver: resolver,
 		vault:    vault,
 		events:   LogSink{},
+		version:  "dev",
 	}
 	// The destination check before forwarding resolves the host once; the dialer checks the
 	// address actually connected to, so a name that re-resolves to a private address (DNS
@@ -235,7 +243,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	body := map[string]interface{}{
 		"status":  "ok",
 		"service": "openwaf-egress",
-		"version": "0.1.0",
+		"version": s.version,
 		"openbao": vaultOK,
 	}
 	if st, ok := s.resolver.(ResolverStats); ok && !withReadiness {
