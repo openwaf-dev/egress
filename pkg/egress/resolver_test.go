@@ -96,7 +96,7 @@ func TestCredentialFromExplicitMount(t *testing.T) {
 		Target:     &TargetConfig{BaseURL: upstream.URL, Host: "openrouter.ai", AuthHeader: "Authorization", AuthPrefix: "Bearer "},
 		Credential: &CredRef{Mount: "tenantkv", Path: "tenants/o/egress/openrouter", Key: "api_key"},
 	}}
-	srv := NewServerWithResolver(res, vc)
+	srv := NewServerWithResolver(res, vc, allowLoopbackUpstream)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agent/a/proxy/openrouter/models", nil))
 	if got != "/v1/tenantkv/data/tenants/o/egress/openrouter" || rec.Header().Get("X-Upstream-Auth-Echo") != "Bearer sk-tenant-tenantkv" {
@@ -120,7 +120,7 @@ func TestCredentialRequiredAndAuthorizationDropped(t *testing.T) {
 		CredentialRequired: true,
 		DropAuthorization:  true,
 	}
-	srv := NewServerWithResolver(staticResolution{r}, &mockVault{secrets: map[string]string{"p:k": "sk-ant"}})
+	srv := NewServerWithResolver(staticResolution{r}, &mockVault{secrets: map[string]string{"p:k": "sk-ant"}}, allowLoopbackUpstream)
 
 	send := func() *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()

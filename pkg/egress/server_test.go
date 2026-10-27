@@ -76,7 +76,7 @@ func testSetup() (*Server, *httptest.Server, *mockVault) {
 		},
 	}
 
-	srv := NewServer(cfg, vault)
+	srv := NewServer(cfg, vault, allowLoopbackUpstream)
 	_ = capturedHost
 	return srv, upstream, vault
 }
@@ -158,7 +158,7 @@ func TestUpstreamRedirectNotFollowed(t *testing.T) {
 		},
 	}
 	vault := &mockVault{secrets: map[string]string{"secret/data/agents/support:ANTHROPIC_API_KEY": "sk-ant-REAL"}}
-	srv := NewServer(cfg, vault)
+	srv := NewServer(cfg, vault, allowLoopbackUpstream)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/proxy/anthropic/v1/messages", strings.NewReader(`{"model":"m"}`))
@@ -344,7 +344,7 @@ func TestPlaceholderTokenNotForwarded(t *testing.T) {
 			},
 		},
 	}
-	srv := NewServer(cfg, &mockVault{secrets: map[string]string{"secret/data/agents/support:GEMINI_API_KEY": "AIza-REAL"}})
+	srv := NewServer(cfg, &mockVault{secrets: map[string]string{"secret/data/agents/support:GEMINI_API_KEY": "AIza-REAL"}}, allowLoopbackUpstream)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/v1/agent/support-agent/proxy/gemini/v1beta/models/m:generateContent", strings.NewReader(`{"contents":[]}`))
 	req.Header.Set("Authorization", "Bearer OWE_TOKEN_SUPPORT_AGENT")

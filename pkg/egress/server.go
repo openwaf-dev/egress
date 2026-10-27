@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/openwaf-dev/egress/pkg/aiagents"
@@ -103,6 +105,8 @@ type Server struct {
 	trustedProxies []netip.Prefix
 	client         *http.Client
 	logOutput      io.Writer
+	// allowPrivateUpstream lifts the dial-time address check (tests with a loopback upstream).
+	allowPrivateUpstream bool
 }
 
 // upstreamHeaderTimeout bounds the wait for the provider's response headers; UpstreamTimeout
@@ -124,7 +128,26 @@ func NewServer(cfg *Config, vault SecretProvider, opts ...Option) *Server {
 // NewServerWithResolver initializes a gateway whose agent policies, targets and credential
 // references come from resolver (e.g. a control-plane document) instead of a Config.
 func NewServerWithResolver(resolver Resolver, vault SecretProvider, opts ...Option) *Server {
+	s := &Server{
+		resolver: resolver,
+		vault:    vault,
+		events:   LogSink{},
+	}
+	// The destination check before forwarding resolves the host once; the dialer checks the
+	// address actually connected to, so a name that re-resolves to a private address (DNS
+	// rebinding) is refused too.
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			if s.allowPrivateUpstream {
+				return nil
+			}
+			return checkDialAddress(address)
+		},
+	}
 	transport := &http.Transport{
+		DialContext:           dialer.DialContext,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -132,20 +155,14 @@ func NewServerWithResolver(resolver Resolver, vault SecretProvider, opts ...Opti
 		// Non-streaming reasoning, image and video generations answer after minutes.
 		ResponseHeaderTimeout: upstreamHeaderTimeout,
 	}
-
-	s := &Server{
-		resolver: resolver,
-		vault:    vault,
-		events:   LogSink{},
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   UpstreamTimeout, // whole exchange, streamed body included
-			// Never follow a redirect: the 3xx goes back to the agent as is. Following it
-			// would resend the injected credential (Go only strips Authorization and Cookie
-			// across hosts, never a custom header such as x-api-key) to a destination that
-			// skipped the target allowlist and the SSRF check.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+	s.client = &http.Client{
+		Transport: transport,
+		Timeout:   UpstreamTimeout, // whole exchange, streamed body included
+		// Never follow a redirect: the 3xx goes back to the agent as is. Following it
+		// would resend the injected credential (Go only strips Authorization and Cookie
+		// across hosts, never a custom header such as x-api-key) to a destination that
+		// skipped the target allowlist and the SSRF check.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -267,10 +284,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 		return
 	}
 
-	// 3. SSRF Protection: target host must not resolve to private addresses
+	// 3. SSRF Protection: target host must not resolve to private addresses. The caller gets no
+	// resolved address; the detail goes to the log only.
 	if err := ValidatePublicDestination(targetCfg.Host); err != nil {
+		log.Printf("[EGRESS 403] ssrf_blocked: Agent=%s Target=%s: %v", resolvedAgent, targetAlias, err)
 		s.emitBlock(r, res, targetAlias, subPath, http.StatusForbidden, CodeSSRFBlocked, nil)
-		s.respondError(w, http.StatusForbidden, CodeSSRFBlocked, fmt.Sprintf("Egress to destination blocked: %v", err))
+		s.respondError(w, http.StatusForbidden, CodeSSRFBlocked, ssrfBlockedMessage)
 		return
 	}
 
@@ -433,7 +452,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 	duration := time.Since(t0)
 
 	if err != nil {
-		s.respondError(w, http.StatusBadGateway, "upstream_error", fmt.Sprintf("Error dialing upstream %s: %v", targetCfg.Host, err))
+		log.Printf("[EGRESS 502] Agent=%s Target=%s Method=%s Path=%s: upstream %s: %v",
+			resolvedAgent, targetAlias, r.Method, subPath, targetCfg.Host, err)
+		if errors.Is(err, errDestinationBlocked) {
+			s.emitBlock(r, res, targetAlias, subPath, http.StatusForbidden, CodeSSRFBlocked, nil)
+			s.respondError(w, http.StatusForbidden, CodeSSRFBlocked, ssrfBlockedMessage)
+			return
+		}
+		s.respondError(w, http.StatusBadGateway, "upstream_error", "Upstream request failed")
 		return
 	}
 	defer resp.Body.Close()

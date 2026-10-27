@@ -1,10 +1,17 @@
 package egress
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 )
+
+// ssrfBlockedMessage is what a caller is told; resolved addresses are logged, not returned.
+const ssrfBlockedMessage = "Egress to destination blocked: the target must resolve only to public addresses"
+
+// errDestinationBlocked: the upstream connection was refused for a non-public address.
+var errDestinationBlocked = errors.New("destination address is not public")
 
 // privateCIDRs covers IPv4 and IPv6 non-public ranges (loopback, private, link-local, multicast, etc.).
 var privatePrefixes = []netip.Prefix{
@@ -18,6 +25,7 @@ var privatePrefixes = []netip.Prefix{
 	netip.MustParsePrefix("224.0.0.0/4"), // Multicast
 	netip.MustParsePrefix("240.0.0.0/4"), // Reserved
 	netip.MustParsePrefix("::1/128"),     // IPv6 loopback
+	netip.MustParsePrefix("::/128"),      // IPv6 unspecified
 	netip.MustParsePrefix("fc00::/7"),    // IPv6 ULA
 	netip.MustParsePrefix("fe80::/10"),   // IPv6 link-local
 	netip.MustParsePrefix("ff00::/8"),    // IPv6 multicast
@@ -71,5 +79,19 @@ func ValidatePublicDestination(host string) error {
 		}
 	}
 
+	return nil
+}
+
+// checkDialAddress refuses a connection to address ("ip:port", as resolved by the dialer)
+// unless the IP is a public unicast address.
+func checkDialAddress(address string) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return errDestinationBlocked
+	}
+	ip := ap.Addr().Unmap()
+	if IsPrivateIP(ip) || ip.IsUnspecified() || !ip.IsGlobalUnicast() {
+		return errDestinationBlocked
+	}
 	return nil
 }
