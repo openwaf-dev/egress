@@ -24,14 +24,8 @@ func main() {
 		return
 	}
 
-	pollDefault := 15 * time.Second
-	if v := os.Getenv("OPENWAF_POLL_INTERVAL"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil || d <= 0 {
-			log.Fatalf("[EGRESS] Invalid OPENWAF_POLL_INTERVAL %q", v)
-		}
-		pollDefault = d
-	}
+	pollDefault := envDuration("OPENWAF_POLL_INTERVAL", 15*time.Second)
+	staleDefault := envDuration("OPENWAF_MAX_STALE", 10*time.Minute)
 
 	configPath := flag.String("config", "config.json", "Path to Egress Gateway config JSON (or /etc/openwaf/egress.json)")
 	listenAddr := flag.String("addr", "", "Override listening address (e.g. :8070)")
@@ -41,6 +35,7 @@ func main() {
 	nodeKey := flag.String("node-key", os.Getenv("OPENWAF_NODE_KEY"), "Path to the node's ed25519 PKCS#8 PEM private key (env OPENWAF_NODE_KEY)")
 	trusted := flag.String("trusted-proxies", os.Getenv("OPENWAF_TRUSTED_PROXIES"), "Comma-separated addresses or CIDRs of reverse proxies in front of the gateway whose X-Real-IP gives the caller address of block events, e.g. 127.0.0.1 (env OPENWAF_TRUSTED_PROXIES)")
 	pollInterval := flag.Duration("poll-interval", pollDefault, "How often to poll the control plane configuration (env OPENWAF_POLL_INTERVAL)")
+	maxStale := flag.Duration("max-stale", staleDefault, "How long the last configuration stays in force when the control plane cannot confirm it; then requests answer 503 (env OPENWAF_MAX_STALE)")
 	flag.Parse()
 
 	if *showVersion {
@@ -112,7 +107,13 @@ func main() {
 			log.Println("[EGRESS] WARN: without OpenBao every control-plane request is refused (no credential to inject)")
 		}
 
-		resolver := controlplane.NewResolver(client, *pollInterval)
+		if *pollInterval <= 0 || *maxStale <= 0 {
+			log.Fatal("[EGRESS] -poll-interval and -max-stale must be positive")
+		}
+		if *maxStale < 2**pollInterval {
+			log.Printf("[EGRESS] WARN: -max-stale %s is less than two poll intervals (%s); one missed poll makes requests answer 503", *maxStale, *pollInterval)
+		}
+		resolver := controlplane.NewResolver(client, controlplane.ResolverOptions{Interval: *pollInterval, MaxStale: *maxStale})
 		first, cancel := context.WithTimeout(ctx, 10*time.Second)
 		if _, err := resolver.Refresh(first); err != nil {
 			log.Printf("[EGRESS] WARN: first control plane config fetch failed (requests answer 503 until one succeeds): %v", err)
@@ -123,7 +124,7 @@ func main() {
 		run(sink.Run)
 		srv = egress.NewServerWithResolver(resolver, vault, append(opts, egress.WithEventSink(sink))...)
 		stats = resolver
-		log.Printf("[EGRESS] Control plane %s as node %s (key id %s), polling every %s", *controlPlane, signer.NodeID(), signer.KeyID(), *pollInterval)
+		log.Printf("[EGRESS] Control plane %s as node %s (key id %s), polling every %s, max stale %s", *controlPlane, signer.NodeID(), signer.KeyID(), *pollInterval, *maxStale)
 	}
 
 	httpServer := &http.Server{
@@ -161,6 +162,19 @@ func main() {
 		<-done
 	}
 	log.Println("[EGRESS] Stopped.")
+}
+
+// envDuration reads a positive duration from the environment variable name, or returns def.
+func envDuration(name string, def time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		log.Fatalf("[EGRESS] Invalid %s %q", name, v)
+	}
+	return d
 }
 
 // keygen writes a new node private key and prints its public key, the value an operator

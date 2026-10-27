@@ -94,26 +94,55 @@ type snapshot struct {
 
 // Resolver resolves agents from the node configuration document it polls from the control
 // plane. It implements egress.Resolver and egress.ResolverStats. Until a first document is
-// accepted every request answers 503; afterwards the last good document stays in force
-// whatever the control plane answers.
+// accepted every request answers 503. Afterwards the last good document stays in force across
+// network and server errors for at most MaxStale since the control plane last confirmed it
+// (200 or 304); a 401 or 403 from the control plane (node revoked or key replaced) withdraws it
+// at once.
 type Resolver struct {
 	client   *Client
 	interval time.Duration
+	maxStale time.Duration
+	now      func() time.Time
 	cur      atomic.Pointer[snapshot]
+	lastOK   atomic.Int64 // unix nanoseconds of the last 200/304; 0 before any
 }
 
-// NewResolver returns a Resolver that polls the control plane every interval (default 15s).
-func NewResolver(client *Client, interval time.Duration) *Resolver {
-	if interval <= 0 {
-		interval = 15 * time.Second
+// ResolverOptions tunes a Resolver; zero values take the defaults.
+type ResolverOptions struct {
+	Interval time.Duration // poll interval (default 15s)
+	MaxStale time.Duration // longest time a document stays in force unconfirmed (default 10m)
+}
+
+// NewResolver returns a Resolver that polls the control plane through client.
+func NewResolver(client *Client, opts ResolverOptions) *Resolver {
+	if opts.Interval <= 0 {
+		opts.Interval = 15 * time.Second
 	}
-	return &Resolver{client: client, interval: interval}
+	if opts.MaxStale <= 0 {
+		opts.MaxStale = 10 * time.Minute
+	}
+	return &Resolver{client: client, interval: opts.Interval, maxStale: opts.MaxStale, now: time.Now}
 }
 
-// Ready reports whether a document has been accepted.
-func (r *Resolver) Ready() bool { return r.cur.Load() != nil }
+// current returns the document in force, or an error when there is none or it is stale.
+func (r *Resolver) current() (*snapshot, error) {
+	snap := r.cur.Load()
+	if snap == nil {
+		return nil, errors.New("no control plane configuration in force")
+	}
+	if age := r.now().Sub(time.Unix(0, r.lastOK.Load())); age > r.maxStale {
+		return nil, fmt.Errorf("control plane configuration serial %d is stale: last confirmed %s ago", snap.serial, age.Round(time.Second))
+	}
+	return snap, nil
+}
 
-// Serial returns the serial of the document in force (0 before the first one).
+// Ready reports whether a document is in force and not stale.
+func (r *Resolver) Ready() bool {
+	_, err := r.current()
+	return err == nil
+}
+
+// Serial returns the serial of the document held (0 when none).
 func (r *Resolver) Serial() int64 {
 	if s := r.cur.Load(); s != nil {
 		return s.serial
@@ -121,7 +150,7 @@ func (r *Resolver) Serial() int64 {
 	return 0
 }
 
-// KVMount returns the KV v2 mount of the document in force.
+// KVMount returns the KV v2 mount of the document held.
 func (r *Resolver) KVMount() string {
 	if s := r.cur.Load(); s != nil {
 		return s.kvMount
@@ -164,8 +193,8 @@ func (r *Resolver) Run(ctx context.Context) {
 	}
 }
 
-// Refresh fetches the document once. It reports whether a new document was accepted; on any
-// error the document in force is kept.
+// Refresh fetches the document once. It reports whether a new document was accepted. On a
+// 401 or 403 the document in force is withdrawn; on any other error it is kept (until stale).
 func (r *Resolver) Refresh(ctx context.Context) (bool, error) {
 	cur := r.cur.Load()
 	since := int64(0)
@@ -181,8 +210,16 @@ func (r *Resolver) Refresh(ctx context.Context) (bool, error) {
 		if cur == nil {
 			return false, errors.New("control plane answered 304 before any document was received")
 		}
+		r.lastOK.Store(r.now().UnixNano())
 		return false, nil
 	case http.StatusOK:
+	case http.StatusUnauthorized, http.StatusForbidden:
+		if cur != nil {
+			log.Printf("[EGRESS] control plane refused this node (HTTP %d): configuration serial %d withdrawn, requests answer 503", status, cur.serial)
+		}
+		r.cur.Store(nil)
+		r.lastOK.Store(0)
+		return false, errors.New(errorMessage(status, body))
 	default:
 		return false, errors.New(errorMessage(status, body))
 	}
@@ -194,7 +231,11 @@ func (r *Resolver) Refresh(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if cur != nil && snap.serial < cur.serial {
+		return false, fmt.Errorf("document serial %d is older than serial %d in force; kept", snap.serial, cur.serial)
+	}
 	r.cur.Store(snap)
+	r.lastOK.Store(r.now().UnixNano())
 	if cur == nil || cur.serial != snap.serial {
 		log.Printf("[EGRESS] control plane config serial %d: %d agents, %d targets", snap.serial, snap.agents, snap.targets)
 	}
@@ -301,9 +342,9 @@ func CredentialPath(orgID, target string) string {
 // Resolve implements egress.Resolver: the bearer token is looked up by SHA-256, and the agent
 // name in /v1/agent/<name>/ must be that agent's name. X-OpenWAF-Agent is ignored.
 func (r *Resolver) Resolve(_ context.Context, req egress.ResolveRequest) (*egress.Resolution, error) {
-	snap := r.cur.Load()
-	if snap == nil {
-		return nil, errors.New("no control plane configuration received yet")
+	snap, err := r.current()
+	if err != nil {
+		return nil, err
 	}
 	if req.Authorization == "" {
 		return nil, &egress.ResolveError{Status: http.StatusUnauthorized, Code: "token_required", Message: "Agent token required: Authorization: Bearer <token>"}

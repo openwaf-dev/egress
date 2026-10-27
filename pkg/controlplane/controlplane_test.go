@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -42,12 +43,13 @@ type fakeControlPlane struct {
 	t   *testing.T
 	pub ed25519.PublicKey
 
-	mu       sync.Mutex
-	nonces   map[string]bool
-	sinces   []string
-	doc      map[string]any
-	failNext int // answer 503 to this many requests
-	batches  [][]byte
+	mu         sync.Mutex
+	nonces     map[string]bool
+	sinces     []string
+	doc        map[string]any
+	failNext   int // answer failStatus (default 503) to this many requests
+	failStatus int
+	batches    [][]byte
 }
 
 var reNonce = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -97,7 +99,7 @@ func (f *fakeControlPlane) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.sinces = append(f.sinces, since)
 		if f.failNext > 0 {
 			f.failNext--
-			w.WriteHeader(http.StatusServiceUnavailable)
+			w.WriteHeader(cmp.Or(f.failStatus, http.StatusServiceUnavailable))
 			return
 		}
 		if since == fmt.Sprint(f.doc["serial"]) {
@@ -165,7 +167,7 @@ func setup(t *testing.T) (*fakeControlPlane, *Client) {
 
 func TestConfigPollingKeepsLastGoodDocument(t *testing.T) {
 	f, c := setup(t)
-	r := NewResolver(c, time.Hour)
+	r := NewResolver(c, ResolverOptions{Interval: time.Hour})
 	ctx := context.Background()
 
 	if _, err := r.Resolve(ctx, egress.ResolveRequest{RouteAgent: "support-bot", Authorization: "Bearer OWE_TOKEN_A", Target: "openrouter"}); err == nil {
@@ -197,9 +199,85 @@ func TestConfigPollingKeepsLastGoodDocument(t *testing.T) {
 	}
 }
 
+// A document the control plane stops confirming stops being used after MaxStale; a 200 or 304
+// confirms it again.
+func TestConfigGoesStale(t *testing.T) {
+	f, c := setup(t)
+	r := NewResolver(c, ResolverOptions{Interval: time.Hour, MaxStale: 10 * time.Minute})
+	now := time.Now()
+	r.now = func() time.Time { return now }
+	ctx := context.Background()
+	req := egress.ResolveRequest{RouteAgent: "support-bot", Authorization: "Bearer OWE_TOKEN_A", Target: "openrouter"}
+	if _, err := r.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(9 * time.Minute)
+	f.failNext = 1
+	if _, err := r.Refresh(ctx); err == nil {
+		t.Fatal("503 not reported")
+	}
+	if _, err := r.Resolve(ctx, req); err != nil || !r.Ready() {
+		t.Fatalf("within max stale: %v", err)
+	}
+	now = now.Add(2 * time.Minute) // 11 min since the last 200
+	_, err := r.Resolve(ctx, req)
+	if _, refusal := err.(*egress.ResolveError); err == nil || refusal || r.Ready() {
+		t.Fatalf("stale document: err %v ready %v; want a non-refusal error (503)", err, r.Ready())
+	}
+	if changed, err := r.Refresh(ctx); err != nil || changed {
+		t.Fatalf("304: changed %v err %v", changed, err)
+	}
+	if _, err := r.Resolve(ctx, req); err != nil || !r.Ready() {
+		t.Fatalf("a 304 must confirm the document again: %v", err)
+	}
+}
+
+// 401 or 403 from the control plane withdraws the document at once.
+func TestConfigWithdrawnOnAuthFailure(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		f, c := setup(t)
+		r := NewResolver(c, ResolverOptions{Interval: time.Hour})
+		ctx := context.Background()
+		if _, err := r.Refresh(ctx); err != nil {
+			t.Fatal(err)
+		}
+		f.failNext, f.failStatus = 1, status
+		if _, err := r.Refresh(ctx); err == nil {
+			t.Fatalf("%d not reported", status)
+		}
+		_, err := r.Resolve(ctx, egress.ResolveRequest{RouteAgent: "support-bot", Authorization: "Bearer OWE_TOKEN_A", Target: "openrouter"})
+		if _, refusal := err.(*egress.ResolveError); err == nil || refusal || r.Ready() || r.Serial() != 0 {
+			t.Fatalf("%d: err %v ready %v serial %d; want the document withdrawn", status, err, r.Ready(), r.Serial())
+		}
+		// The next good answer restores service; since_serial starts over from 0.
+		if changed, err := r.Refresh(ctx); err != nil || !changed || !r.Ready() || f.sinces[len(f.sinces)-1] != "0" {
+			t.Fatalf("%d: recovery: changed %v err %v sinces %v", status, changed, err, f.sinces)
+		}
+	}
+}
+
+// A document older than the one in force is refused.
+func TestConfigSerialNeverGoesBack(t *testing.T) {
+	f, c := setup(t)
+	r := NewResolver(c, ResolverOptions{Interval: time.Hour})
+	ctx := context.Background()
+	if _, err := r.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.doc = testDoc(41)
+	f.doc["tenants"] = []any{}
+	if changed, err := r.Refresh(ctx); err == nil || changed || r.Serial() != 42 {
+		t.Fatalf("older serial: changed %v err %v serial %d", changed, err, r.Serial())
+	}
+	if agents, _ := r.Counts(); agents != 2 {
+		t.Errorf("the document in force was replaced: %d agents", agents)
+	}
+}
+
 func TestResolveByToken(t *testing.T) {
 	_, c := setup(t)
-	r := NewResolver(c, time.Hour)
+	r := NewResolver(c, ResolverOptions{Interval: time.Hour})
 	ctx := context.Background()
 	if _, err := r.Refresh(ctx); err != nil {
 		t.Fatal(err)
@@ -253,7 +331,7 @@ func TestResolveByToken(t *testing.T) {
 // wrong route name answers 401 without an event.
 func TestGatewayReportsTenantBlocks(t *testing.T) {
 	f, c := setup(t)
-	r := NewResolver(c, time.Hour)
+	r := NewResolver(c, ResolverOptions{Interval: time.Hour})
 	if _, err := r.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
