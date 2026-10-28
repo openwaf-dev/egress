@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"regexp"
+	"strings"
 )
 
 // ssrfBlockedMessage is what a caller is told; resolved addresses are logged, not returned.
@@ -46,6 +48,27 @@ func IsPrivateIP(ip netip.Addr) bool {
 	return false
 }
 
+// suspiciousIPLiteral matches host spellings Go's netip does not accept but resolvers may
+// interpret as IPv4: all-decimal ("2130706433"), hex ("0x7f000001") and all-numeric dotted
+// forms with out-of-range, zero-padded or missing components ("127.1", "0177.0.0.1",
+// "127.0.0.01"; netip rejects zero-padded components, so every such form lands here). They
+// are refused before any DNS lookup, so a resolver quirk cannot turn them into a private
+// address. Mixed hex-dotted spellings ("0x7f.0.0.1", "0x7f.1") are not matched: they go to
+// the resolver, and the dial-time check (checkDialAddress) still refuses a private result.
+var (
+	reDecimalIP = regexp.MustCompile(`^\d{1,10}$`)
+	reHexIP     = regexp.MustCompile(`(?i)^0[xX][0-9a-f]{1,8}$`)
+	// reDottedNum: an all-numeric dotted host (any label length). All-numeric names are IP
+	// literals, never domains, so anything netip did not accept (leading zeros, out-of-range
+	// or too-short forms) is refused instead of reaching a resolver that may read the bytes
+	// either way.
+	reDottedNum = regexp.MustCompile(`^\d+(\.\d+){0,3}$`)
+)
+
+func suspiciousIPLiteral(host string) bool {
+	return reDecimalIP.MatchString(host) || reHexIP.MatchString(host) || reDottedNum.MatchString(host)
+}
+
 // ValidatePublicDestination checks that the hostname or IP does not resolve to an internal/private address.
 func ValidatePublicDestination(host string) error {
 	// Strip port if present
@@ -53,6 +76,8 @@ func ValidatePublicDestination(host string) error {
 	if err == nil {
 		host = h
 	}
+	// A trailing dot is the same name; make sure ParseAddr sees "8.8.8.8." as an IP.
+	host = strings.TrimSuffix(host, ".")
 
 	// Direct IP check
 	if ip, err := netip.ParseAddr(host); err == nil {
@@ -60,6 +85,12 @@ func ValidatePublicDestination(host string) error {
 			return fmt.Errorf("destination IP %s is private or reserved", ip)
 		}
 		return nil
+	}
+
+	// Numeric spellings netip rejected (decimal, hex, zero-padded) are never hostnames worth
+	// shipping to a resolver: refuse them here, deterministically.
+	if suspiciousIPLiteral(host) {
+		return fmt.Errorf("destination %s is a numeric IP literal in an unsupported form", host)
 	}
 
 	// Resolve hostname

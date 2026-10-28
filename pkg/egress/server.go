@@ -508,6 +508,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 
 func (s *Server) respondError(w http.ResponseWriter, code int, errCode, msg string) {
 	w.Header().Set("Content-Type", "application/json")
+	// 401s carry the authentication challenge the agent SDKs need to resend correctly.
+	if code == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", `Bearer`)
+	}
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{
 		"error":   errCode,
