@@ -140,6 +140,28 @@ Blocked requests get JSON such as:
 }
 ```
 
+Error codes (`"error"` field):
+
+| Status | Code | When |
+|---|---|---|
+| 401 | `token_required` | The agent has a token and the request sent no `Authorization: Bearer <token>`. |
+| 401 | `invalid_scheme` | `Authorization` is present but does not use the `Bearer` scheme (e.g. `Basic …` or a bare `OWE_…` value). The scheme is case-insensitive. Config-file mode; the control-plane mode answers `invalid_token`. |
+| 401 | `invalid_token` | The token does not match the agent. |
+| 401 | `unauthorized_agent` | No agent named by the route or `X-OpenWAF-Agent`, and no agent with that token. |
+| 403 | `egress_blocked` | Target not in the agent's `allowed_targets`. |
+| 403 | `ssrf_blocked` | Target resolves or connects to a private or reserved address, or is a numeric IP literal in an unsupported form (`2130706433`, `0x7f000001`, `127.1`, `0177.0.0.1`). |
+| 403 | `injection_detected` · `data_leak_blocked` | Body inspection. |
+| 404 | `unknown_target` | No such target. |
+| 413 | `body_too_large` | Body over 8 MiB, or inspectable text over 1 MiB. |
+| 502 | `credential_resolution_failed` · `upstream_error` | Key not readable from OpenBao; upstream unreachable. |
+| 503 | `policy_unavailable` | Control-plane mode without a valid configuration. |
+
+Every `401` carries `WWW-Authenticate: Bearer`.
+
+The config file is validated at start-up: a target whose `base_url` is not an absolute `http(s)` URL
+with a host, a target without `host`, or an agent whose `allowed_targets` names a target that does not
+exist stops the gateway with an error naming the target or agent.
+
 ## OpenWAF Cloud data plane mode
 
 The same binary can run as a hosted node of [OpenWAF Cloud](https://openwaf.dev): agents,
@@ -220,6 +242,13 @@ cuanto el panel rechaza el nodo (`401`/`403`), las peticiones responden `503` y 
 (`OPENWAF_TRUSTED_PROXIES`) toma la IP del cliente de su `X-Real-IP`. `egress keygen -out node.key` crea la clave del nodo
 e imprime la clave pública que el operador registra. Detalles del protocolo en
 [docs/control-plane.md](docs/control-plane.md).
+
+**Autenticación:** el token va en `Authorization: Bearer <token>` (el esquema no distingue
+mayúsculas). Una cabecera `Authorization` con otro esquema, o con el token sin `Bearer`, responde
+`401 invalid_scheme` (modo de fichero; el modo plano de datos responde `invalid_token`), y todo `401`
+lleva `WWW-Authenticate: Bearer`. El fichero de configuración se valida al arrancar: un destino sin
+`base_url` `http(s)` absoluta o sin `host`, o un agente cuyo `allowed_targets` nombra un destino que
+no existe, impide arrancar con un error que nombra el destino o el agente.
 
 Expón la pasarela solo en loopback o en una red privada. Vulnerabilidades:
 **security@openwaf.dev**.

@@ -1,12 +1,15 @@
 package egress
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -96,7 +99,8 @@ func TestUnauthorizedCarriesChallenge(t *testing.T) {
 }
 
 // Numeric IP spellings netip rejects must be refused before any DNS lookup; a trailing dot
-// normalizes to the same IP and 8.8.8.8 stays allowed (public).
+// normalizes to the same IP and 8.8.8.8 stays allowed (public). Hex-dotted forms ("0x7f.0.0.1",
+// "0x7f.1") are not caught here; TestHexDottedHostBlockedAtDial covers them at dial time.
 func TestValidatePublicDestinationNumericForms(t *testing.T) {
 	cases := []struct {
 		host    string
@@ -147,5 +151,81 @@ func TestLoadConfigValidation(t *testing.T) {
 	cpStyle := `{"agents":{"a":{"token":"t","allowed_targets":["from-control-plane"]}}}`
 	if _, err := LoadConfig(write("cp.json", cpStyle)); err != nil {
 		t.Errorf("control-plane style config rejected: %v", err)
+	}
+}
+
+// stubDNS answers every A query on a local UDP socket: the first with first, later ones with
+// later (a DNS-rebinding resolver); AAAA queries get no answer. It replaces net.DefaultResolver
+// for the test, so no real DNS is involved.
+func stubDNS(t *testing.T, first, later [4]byte) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aQueries atomic.Int32
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			q := buf[:n]
+			// Header (12) + question name + QTYPE(2) + QCLASS(2).
+			end := 12
+			for end < n && q[end] != 0 {
+				end += int(q[end]) + 1
+			}
+			end += 5
+			if end > n {
+				continue
+			}
+			resp := append([]byte(nil), q[:end]...)
+			resp[2], resp[3] = 0x81, 0x80 // response, recursion desired+available, NOERROR
+			resp[6], resp[7] = 0, 0       // ANCOUNT
+			resp[8], resp[9], resp[10], resp[11] = 0, 0, 0, 0
+			if q[end-4] == 0 && q[end-3] == 1 { // QTYPE A
+				ip := later
+				if aQueries.Add(1) == 1 {
+					ip = first
+				}
+				resp[7] = 1
+				resp = append(resp, 0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4)
+				resp = append(resp, ip[:]...)
+			}
+			pc.WriteTo(resp, from)
+		}
+	}()
+	prev := net.DefaultResolver
+	net.DefaultResolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "udp", pc.LocalAddr().String())
+	}}
+	t.Cleanup(func() { net.DefaultResolver = prev; pc.Close() })
+}
+
+// Hex-dotted spellings ("0x7f.1") are not numeric literals for the pre-DNS check and go to the
+// resolver. If it first answers a public address and then the private one (rebinding, or a
+// resolver that reads the name as 127.0.0.1), the dial-time check still refuses the connection.
+func TestHexDottedHostBlockedAtDial(t *testing.T) {
+	if suspiciousIPLiteral("0x7f.1") || suspiciousIPLiteral("0x7f.0.0.1") {
+		t.Fatal("hex-dotted forms are now caught pre-DNS; this test no longer covers the dial-time path")
+	}
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	defer upstream.Close()
+	_, port, _ := net.SplitHostPort(upstream.Listener.Addr().String())
+	stubDNS(t, [4]byte{8, 8, 8, 8}, [4]byte{127, 0, 0, 1})
+
+	res := &Resolution{
+		AgentID: "a", AgentName: "a",
+		Policy: AgentPolicy{AllowedTargets: []string{"x"}},
+		Target: &TargetConfig{BaseURL: "http://0x7f.1:" + port, Host: "0x7f.1", AuthHeader: "Authorization"},
+	}
+	srv := NewServerWithResolver(staticResolution{res}, nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agent/a/proxy/x/models", nil))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), CodeSSRFBlocked) || called {
+		t.Fatalf("got %d %s, upstream called %v", rec.Code, rec.Body.String(), called)
 	}
 }

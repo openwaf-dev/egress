@@ -49,9 +49,12 @@ func IsPrivateIP(ip netip.Addr) bool {
 }
 
 // suspiciousIPLiteral matches host spellings Go's netip does not accept but resolvers may
-// interpret as IPv4: all-decimal ("2130706433"), hex ("0x7f000001") and dotted-quad forms
-// with out-of-range or zero-padded components ("127.1", "0177.0.0.1", "127.0.0.01"). They are
-// refused before any DNS lookup, so a resolver quirk cannot turn them into a private address.
+// interpret as IPv4: all-decimal ("2130706433"), hex ("0x7f000001") and all-numeric dotted
+// forms with out-of-range, zero-padded or missing components ("127.1", "0177.0.0.1",
+// "127.0.0.01"; netip rejects zero-padded components, so every such form lands here). They
+// are refused before any DNS lookup, so a resolver quirk cannot turn them into a private
+// address. Mixed hex-dotted spellings ("0x7f.0.0.1", "0x7f.1") are not matched: they go to
+// the resolver, and the dial-time check (checkDialAddress) still refuses a private result.
 var (
 	reDecimalIP = regexp.MustCompile(`^\d{1,10}$`)
 	reHexIP     = regexp.MustCompile(`(?i)^0[xX][0-9a-f]{1,8}$`)
@@ -60,20 +63,10 @@ var (
 	// or too-short forms) is refused instead of reaching a resolver that may read the bytes
 	// either way.
 	reDottedNum = regexp.MustCompile(`^\d+(\.\d+){0,3}$`)
-	// reLeadingZeroNum: a numeric dotted component starting with 0 ("0177.0.0.1"). netip
-	// rejects those literals outright, classic inet_addr reads them as octal (127.0.0.1) and
-	// other readers as decimal (177.0.0.1): the ambiguity itself is refused.
-	reLeadingZeroNum = regexp.MustCompile(`(?:^|\.)0\d`)
 )
 
 func suspiciousIPLiteral(host string) bool {
 	return reDecimalIP.MatchString(host) || reHexIP.MatchString(host) || reDottedNum.MatchString(host)
-}
-
-// ambiguousDottedLiteral reports a dotted numeric host with a zero-padded component, for
-// which netip and inet_addr disagree about the value.
-func ambiguousDottedLiteral(host string) bool {
-	return reDottedNum.MatchString(host) && reLeadingZeroNum.MatchString(host)
 }
 
 // ValidatePublicDestination checks that the hostname or IP does not resolve to an internal/private address.
@@ -90,9 +83,6 @@ func ValidatePublicDestination(host string) error {
 	if ip, err := netip.ParseAddr(host); err == nil {
 		if IsPrivateIP(ip) {
 			return fmt.Errorf("destination IP %s is private or reserved", ip)
-		}
-		if ambiguousDottedLiteral(host) {
-			return fmt.Errorf("destination %s is an ambiguous numeric IP literal", host)
 		}
 		return nil
 	}
