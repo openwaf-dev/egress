@@ -3,6 +3,8 @@
 ## Reporting a vulnerability
 
 Email **security@openwaf.dev** with a description, the affected version or commit, and steps to
+reproduce. Please do not open a public issue or pull request for a vulnerability. We confirm that we
+received the report, keep you informed until a fixed release is published, and
 credit reporters in the release notes unless you ask us not to.
 
 ## Scope
