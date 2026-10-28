@@ -3,6 +3,7 @@ package egress
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -84,6 +85,45 @@ func LoadConfig(path string) (*Config, error) {
 	if err := cfg.validateAgents(); err != nil {
 		return nil, err
 	}
+	if err := cfg.validateTargets(); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
+}
+
+// validateTargets fails fast on targets that could never work or would silently fail closed:
+// an unparseable base_url, a non-http scheme, a missing host, and agent allowlists naming
+// targets that do not exist (a typo would otherwise answer 403 egress_blocked at run time).
+func (c *Config) validateTargets() error {
+	aliases := make(map[string]bool, len(c.Targets))
+	for alias, t := range c.Targets {
+		if strings.TrimSpace(alias) == "" {
+			return fmt.Errorf("target alias must not be empty")
+		}
+		u, err := url.Parse(t.BaseURL)
+		if err != nil || u.Scheme == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("target %q: base_url must be an absolute http(s) URL, got %q", alias, t.BaseURL)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("target %q: base_url must include a host, got %q", alias, t.BaseURL)
+		}
+		if strings.TrimSpace(t.Host) == "" {
+			return fmt.Errorf("target %q: host must not be empty", alias)
+		}
+		aliases[alias] = true
+	}
+	// Only cross-check allowlists when targets are configured here: control-plane mode may
+	// carry agents in the file and take their targets from the control plane.
+	if len(c.Targets) > 0 {
+		for name, a := range c.Agents {
+			for _, allowed := range a.AllowedTargets {
+				if allowed == "*" || aliases[allowed] {
+					continue
+				}
+				return fmt.Errorf("agent %q: allowed_targets %q is not a configured target", name, allowed)
+			}
+		}
+	}
+	return nil
 }

@@ -72,9 +72,23 @@ type ResolverReadiness interface {
 	Ready() bool
 }
 
-// bearerToken returns the Authorization value without its "Bearer " prefix.
-func bearerToken(authorization string) string {
-	return strings.TrimPrefix(authorization, "Bearer ")
+// bearerToken splits an Authorization header on its "Bearer" scheme. The scheme is matched
+// case-insensitively and one or more spaces may separate it from the token (RFC 7235); ok is
+// false when the header is absent, empty, or uses any other scheme, so callers can answer 401
+// without ever comparing a foreign scheme's value with an agent token.
+func bearerToken(authorization string) (token string, ok bool) {
+	if authorization == "" {
+		return "", false
+	}
+	i := strings.IndexByte(authorization, ' ')
+	if i <= 0 || !strings.EqualFold(authorization[:i], "Bearer") {
+		return "", false
+	}
+	token = strings.TrimSpace(authorization[i+1:])
+	if token == "" {
+		return "", false
+	}
+	return token, true
 }
 
 // tokenMatches compares the presented token with the agent's token or token_sha256 in
@@ -105,13 +119,19 @@ func (c *Config) Resolve(_ context.Context, req ResolveRequest) (*Resolution, er
 	if req.HeaderAgent != "" {
 		name = req.HeaderAgent
 	}
-	token := bearerToken(req.Authorization)
+	token, isBearer := bearerToken(req.Authorization)
+
+	// A present Authorization header must be Bearer: a Basic/Custom-scheme header is refused
+	// outright instead of being compared with agent tokens or silently ignored.
+	if req.Authorization != "" && !isBearer {
+		return nil, &ResolveError{http.StatusUnauthorized, "invalid_scheme", `Authorization must use the "Bearer <token>" scheme`}
+	}
 
 	var agent AgentConfig
 	found := false
 	if name != "" {
 		agent, found = c.Agents[name]
-	} else if req.Authorization != "" {
+	} else if isBearer {
 		for n, a := range c.Agents {
 			if a.tokenMatches(token) {
 				agent, name, found = a, n, true
