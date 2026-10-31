@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -16,8 +17,9 @@ var (
 	reOpenAIKey  = regexp.MustCompile(`\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b`)
 	reGitHubKey  = regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b`)
 
-	reBase64Run = regexp.MustCompile(`[A-Za-z0-9+/_-]{16,}={0,2}`)
-	reHexRun    = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{2}){8,}\b`)
+	reBase64Run  = regexp.MustCompile(`[A-Za-z0-9+/_-]{16,}={0,2}`)
+	reHexRun     = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{2}){8,}\b`)
+	reUnicodeEsc = regexp.MustCompile(`\\u([0-9a-fA-F]{4})`)
 )
 
 // DLPMatch describes a sensitive data detection.
@@ -82,6 +84,22 @@ func normalizeDLP(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// decodeUnicodeEscapes replaces literal \uXXXX sequences (a JSON body quoting a string the client built, or a payload
+// that was meant to be decoded twice) with the character they name, so the invisibles and fullwidth forms they hide are
+// the ones the normal form removes.
+func decodeUnicodeEscapes(s string) string {
+	if !strings.Contains(s, "\\u") {
+		return ""
+	}
+	return reUnicodeEsc.ReplaceAllStringFunc(s, func(m string) string {
+		n, err := strconv.ParseUint(m[2:], 16, 32)
+		if err != nil {
+			return m
+		}
+		return string(rune(n))
+	})
 }
 
 // decodeURL decodes percent escapes once when the text carries them.
@@ -149,6 +167,10 @@ func normalizationVariants(text string) []string {
 		for _, v := range out[:n] {
 			add(normalizeDLP(v))
 			add(decodeURL(v))
+			if u := decodeUnicodeEscapes(v); u != "" {
+				add(u)
+				add(normalizeDLP(u))
+			}
 			for _, d := range decodeEncodings(v) {
 				add(d)
 				add(normalizeDLP(d))
