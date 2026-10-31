@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"encoding/base32"
 	"encoding/base64"
 	"testing"
 )
@@ -25,6 +26,7 @@ func TestScanDLPThroughEncodings(t *testing.T) {
 		{"double-escaped zero-width card", `4242\\u200b4242\\u200b4242\\u200b4242`, true},
 		{"base64 of real zero-width card", base64.StdEncoding.EncodeToString([]byte("4242\u200b4242\u200b4242\u200b4242")), true},
 		{"base64 of fullwidth card", base64.StdEncoding.EncodeToString([]byte("\uff14\uff12\uff14\uff12 \uff14\uff12\uff14\uff12 \uff14\uff12\uff14\uff12 \uff14\uff12\uff14\uff12")), true},
+		{"base32 card", base32.StdEncoding.EncodeToString([]byte(card)), true},
 		{"private key", "-----BEGIN RSA PRIVATE KEY-----", true},
 		{"benign", "hola, quiero reservar una cita el 12 de marzo", false},
 		{"numbers only", "pedido 1234567890 con 42 unidades", false},

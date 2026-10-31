@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"net/url"
@@ -137,10 +138,22 @@ func readable(b []byte) bool {
 func decodeEncodings(s string) []string {
 	var out []string
 	for _, run := range reBase64Run.FindAllString(s, -1) {
+		// Base64 and, for a run that also fits its alphabet, base32 (RFC 4648): the cheapest transforms an agent
+		// reaches for. Anything that decodes to binary is discarded, so the guess costs nothing when it is wrong.
+		decoded := false
 		for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
 			if dec, err := enc.DecodeString(run); err == nil && readable(dec) {
 				out = append(out, string(dec))
+				decoded = true
 				break
+			}
+		}
+		if !decoded {
+			for _, enc := range []*base32.Encoding{base32.StdEncoding, base32.StdEncoding.WithPadding(base32.NoPadding)} {
+				if dec, err := enc.DecodeString(run); err == nil && readable(dec) {
+					out = append(out, string(dec))
+					break
+				}
 			}
 		}
 	}
