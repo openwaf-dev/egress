@@ -19,7 +19,7 @@ var (
 
 	reBase64Run  = regexp.MustCompile(`[A-Za-z0-9+/_-]{16,}={0,2}`)
 	reHexRun     = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{2}){8,}\b`)
-	reUnicodeEsc = regexp.MustCompile(`\\u([0-9a-fA-F]{4})`)
+	reUnicodeEsc = regexp.MustCompile(`\\+u([0-9a-fA-F]{4})`)
 )
 
 // DLPMatch describes a sensitive data detection.
@@ -94,7 +94,9 @@ func decodeUnicodeEscapes(s string) string {
 		return ""
 	}
 	return reUnicodeEsc.ReplaceAllStringFunc(s, func(m string) string {
-		n, err := strconv.ParseUint(m[2:], 16, 32)
+		// One or more backslashes, then u and exactly four hex digits.
+		i := strings.LastIndexByte(m, 'u')
+		n, err := strconv.ParseUint(m[i+1:], 16, 32)
 		if err != nil {
 			return m
 		}
@@ -113,18 +115,22 @@ func decodeURL(s string) string {
 	return ""
 }
 
-// readable reports whether most of b is printable text (a decoded blob of binary is not worth scanning).
+// readable reports whether a decoded blob is text worth scanning: most of its runes are printable (the invisible
+// formatting an agent hides a card with is not printable, and its UTF-8 bytes are not ASCII, so the check counts runes
+// and lets those through to the normal form that removes them).
 func readable(b []byte) bool {
 	if len(b) < 8 {
 		return false
 	}
-	printable := 0
-	for _, c := range b {
-		if c >= 0x20 && c < 0x7f {
-			printable++
+	text := 0
+	total := 0
+	for _, r := range string(b) {
+		total++
+		if unicode.IsPrint(r) || zeroWidth[r] || unicode.Is(unicode.Cf, r) {
+			text++
 		}
 	}
-	return printable*4 >= len(b)*3
+	return total > 0 && text*4 >= total*3
 }
 
 // decodeEncodings returns the readable text of every base64 and hex run in s.
