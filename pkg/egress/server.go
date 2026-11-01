@@ -370,7 +370,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 			}
 		}
 
-		// DLP check
+		// DLP check. Every decision is logged, allowed or blocked, with what matched but never the value: the rule,
+		// the chain of encodings that hid it and the keyed hash of the fragment.
 		if policy.BlockDLP {
 			dlpMatches := ScanDLP(inspected)
 			if len(dlpMatches) > 0 {
@@ -379,6 +380,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 					if !slices.Contains(types, m.Type) {
 						types = append(types, m.Type)
 					}
+					log.Printf("[EGRESS DLP] block agent=%q target=%q path=%q type=%s rule=%s chain=%s hash=%s size=%d",
+						resolvedAgent, targetAlias, subPath, m.Type, m.Rule, m.Chain, m.Hash, len(bodyBytes))
 				}
 				s.emitBlock(r, res, targetAlias, subPath, http.StatusForbidden, CodeDataLeakBlocked, types)
 				w.Header().Set("Content-Type", "application/json")
@@ -392,6 +395,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request, agentName, 
 				})
 				return
 			}
+			variants, _, _ := dlpVariants(inspected)
+			log.Printf("[EGRESS DLP] allow agent=%q target=%q path=%q size=%d variants=%d",
+				resolvedAgent, targetAlias, subPath, len(bodyBytes), len(variants))
 		}
 	}
 
