@@ -62,7 +62,10 @@ ordinary traffic skips almost all of them. The static binary is about 7 MB.
 
 ## Quickstart
 
+Start from the example configuration (set `openbao` to your OpenBao or Vault, and give each agent its own token):
+
 ```bash
+curl -sSfLo config.json https://raw.githubusercontent.com/openwaf-dev/egress/main/config.example.json
 docker run -d --name openwaf-egress -p 127.0.0.1:8070:8070 \
   -v "$PWD/config.json:/app/config.json:ro" \
   ghcr.io/openwaf-dev/egress:latest
